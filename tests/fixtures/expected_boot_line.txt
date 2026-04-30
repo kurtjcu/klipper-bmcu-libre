@@ -1,0 +1,1 @@
+BOOT mag0=ok mag1=ok mag2=ok mag3=ok
