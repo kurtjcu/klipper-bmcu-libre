@@ -786,3 +786,131 @@ class TestBmcuStallDetection:
         feeder._check_events(ch, dict(ch.state))
 
         assert len(reactor.callbacks) == 1, "stall must detect delta < stall_threshold_mm=0.1"
+
+
+# ===========================================================================
+# Plan 02-04 Task 1: get_status() and serial disconnect handling (KL-11, KL-12, KL-16)
+# ===========================================================================
+
+class TestBmcuGetStatus:
+    """Tests for get_status() Moonraker visibility and serial disconnect handling."""
+
+    def _make_feeder_with_channels(self, monkeypatch, ch_ids=(0,)):
+        """Helper: build a connected BmcuFeeder with the given channel IDs."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        for ch_id in ch_ids:
+            ch_cfg = MockConfig({'extruder': 'extruder'}, name='bmcu_channel %d' % ch_id)
+            ch_cfg.printer = cfg.printer
+            cfg.printer.add_object('bmcu_channel %d' % ch_id, BmcuChannel(ch_cfg))
+
+        serial_instances = []
+
+        def mock_serial_cls(port, baud, timeout):
+            ms = MockSerial(port, baud, timeout)
+            serial_instances.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        feeder._handle_connect()
+        return feeder, serial_instances
+
+    def test_get_status(self, monkeypatch):
+        """get_status(eventtime) returns a dict with a 'channels' key."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0, 1))
+        result = feeder.get_status(0.0)
+        assert isinstance(result, dict), "get_status must return a dict"
+        assert 'channels' in result, "get_status must return dict with 'channels' key"
+        channels = result['channels']
+        assert isinstance(channels, dict), "'channels' must be a dict"
+        assert '0' in channels, "channel 0 must appear as string key '0'"
+        assert '1' in channels, "channel 1 must appear as string key '1'"
+        ch0 = channels['0']
+        assert 'filament_present' in ch0
+        assert 'motor_running' in ch0
+        assert 'feed_mm' in ch0
+        assert 'speed' in ch0
+        assert 'direction' in ch0
+        assert 'mag_status' in ch0
+        assert 'sensor_enabled' in ch0
+
+    def test_status_immutability(self, monkeypatch):
+        """Two consecutive get_status() calls return different dict objects."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        result1 = feeder.get_status(0.0)
+        result2 = feeder.get_status(0.0)
+        assert id(result1) != id(result2), \
+            "get_status must return a NEW dict each call (different object identity)"
+
+    def test_status_type_casts(self, monkeypatch):
+        """get_status() values are proper Python types: bool, float, int."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        # Set up known state
+        feeder._channels[0].state.update({
+            'filament_present': True,
+            'motor_running': False,
+            'feed_mm': 12.5,
+            'speed': 75,
+            'direction': 'FWD',
+            'mag_status': 'ok',
+        })
+        result = feeder.get_status(0.0)
+        ch = result['channels']['0']
+        assert isinstance(ch['filament_present'], bool), \
+            "filament_present must be bool, got %s" % type(ch['filament_present'])
+        assert isinstance(ch['motor_running'], bool), \
+            "motor_running must be bool, got %s" % type(ch['motor_running'])
+        assert isinstance(ch['feed_mm'], float), \
+            "feed_mm must be float, got %s" % type(ch['feed_mm'])
+        assert isinstance(ch['speed'], int), \
+            "speed must be int, got %s" % type(ch['speed'])
+        assert isinstance(ch['direction'], str), \
+            "direction must be str, got %s" % type(ch['direction'])
+        assert isinstance(ch['sensor_enabled'], bool), \
+            "sensor_enabled must be bool, got %s" % type(ch['sensor_enabled'])
+
+    def test_serial_error_logs(self, monkeypatch):
+        """_handle_serial_error logs 'BMCU serial error: {msg}' via logging.error."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch)
+        log_calls = []
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.logging.error',
+                            lambda msg, *args: log_calls.append(msg % args if args else msg))
+        feeder._handle_serial_error("device disconnected")
+        assert len(log_calls) == 1, "logging.error must be called once"
+        assert "BMCU serial error: device disconnected" in log_calls[0], \
+            "log message must contain 'BMCU serial error: device disconnected'"
+
+    def test_serial_error_triggers_runout(self, monkeypatch):
+        """When _handle_serial_error called and channel has motor_running=True + sensor_enabled=True,
+        a runout callback is registered for that channel."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        # Set channel as active (motor running, sensor enabled)
+        ch.state['motor_running'] = True
+        ch.sensor_enabled = True
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.logging.error', lambda *a, **k: None)
+        feeder._handle_serial_error("USB disconnect")
+
+        assert len(reactor.callbacks) == 1, \
+            "runout callback must be registered for active channel on serial error"
+
+    def test_serial_error_no_runout_inactive(self, monkeypatch):
+        """When _handle_serial_error called and channel has motor_running=False,
+        no runout handler is registered."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        # Channel inactive (motor stopped)
+        ch.state['motor_running'] = False
+        ch.sensor_enabled = True
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.logging.error', lambda *a, **k: None)
+        feeder._handle_serial_error("USB disconnect")
+
+        assert len(reactor.callbacks) == 0, \
+            "no runout callback must be registered when motor_running=False"

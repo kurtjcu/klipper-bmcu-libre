@@ -361,6 +361,10 @@ class BmcuFeeder:
 
     def _handle_serial_error(self, msg):
         logging.error("BMCU serial error: %s" % msg)
+        for ch in self._channels.values():
+            if ch.state.get('motor_running') and ch.sensor_enabled:
+                self.reactor.register_callback(
+                    lambda et, c=ch: self._runout_handler(et, c))
 
     def get_status(self, eventtime):
         """Return a new dict each call for Moonraker change detection."""
