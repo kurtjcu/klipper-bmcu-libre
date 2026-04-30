@@ -144,6 +144,13 @@ class BmcuFeeder:
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
         self.serial_port = config.get('serial')
+        # Warn if serial path is bare ttyUSB/ttyACM — unstable across reboots
+        if ('ttyUSB' in self.serial_port or 'ttyACM' in self.serial_port) \
+                and 'by-path' not in self.serial_port \
+                and 'by-id' not in self.serial_port:
+            raise config.error(
+                "BMCU: serial path must use /dev/serial/by-path/ for stable "
+                "device assignment (got: %s)" % self.serial_port)
         self.baud = config.getint('baud', 115200)
         self.poll_interval = config.getfloat('poll_interval', 0.5, minval=0.1)
         self._serial = None

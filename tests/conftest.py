@@ -233,6 +233,9 @@ class MockConfig:
             return default
         raise KeyError("Missing config key: %s" % key)
 
+    def error(self, msg):
+        return Exception(msg)
+
 
 # ---------------------------------------------------------------------------
 # Mock GCode command object
