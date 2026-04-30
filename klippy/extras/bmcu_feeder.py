@@ -6,11 +6,19 @@ control over USB serial. Drop this file into ~/klipper/klippy/extras/ and
 restart Klipper.
 
 Phase 2 plan 01: BmcuSerial, BmcuChannel, BmcuFeeder foundation.
+Phase 2 plan 02: GCode commands, polling timer, STATUS response parser.
 """
 
 import serial
 import logging
 import re
+
+# ---------------------------------------------------------------------------
+# Module-level regex for parsing multi-channel STATUS response lines
+# ---------------------------------------------------------------------------
+
+_STATUS_FIELD_RE = re.compile(
+    r'ch=(\d) fil=(\d) mot=(\d) spd=(\d+) dir=(\w+) mm=([\d.]+) mag=(\w+)')
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +119,14 @@ class BmcuChannel:
             'mag_status': 'unknown',
         }
 
+    def cmd_set_sensor(self, gcmd):
+        """GCode handler for SET_BMCU_SENSOR CHANNEL=N ENABLE=0|1."""
+        enable = gcmd.get_int('ENABLE', minval=0, maxval=1)
+        self.sensor_enabled = bool(enable)
+        gcmd.respond_info("BMCU channel %d sensor %s" %
+                         (self.channel_id,
+                          "enabled" if self.sensor_enabled else "disabled"))
+
 
 # ---------------------------------------------------------------------------
 # BmcuFeeder — top-level extra; single instance per [bmcu_feeder] section
@@ -140,6 +156,7 @@ class BmcuFeeder:
         self.printer.register_event_handler("klippy:disconnect",
                                             self._handle_disconnect)
         self.printer.add_object('bmcu_feeder', self)
+        self._register_commands()
 
     def _handle_connect(self):
         """Discover channels and open serial port."""
@@ -153,6 +170,7 @@ class BmcuFeeder:
         if not self._channels:
             raise self.printer.config_error(
                 "BMCU: no [bmcu_channel N] sections found in config")
+        self._register_sensor_commands()
         # Open serial
         try:
             self._serial = BmcuSerial(self.serial_port, self.baud, self.reactor)
@@ -176,11 +194,122 @@ class BmcuFeeder:
             self._serial.disconnect()
             self._serial = None
 
+    def _register_commands(self):
+        """Register the five feeder-wide GCode commands.
+
+        SET_BMCU_SENSOR mux commands are registered per-channel after channel
+        discovery in _handle_connect, once _channels is populated.
+        """
+        self.gcode.register_command(
+            'BMCU_RUN', self._cmd_run,
+            desc="Run BMCU feeder motor: BMCU_RUN CHANNEL=0")
+        self.gcode.register_command(
+            'BMCU_STOP', self._cmd_stop,
+            desc="Stop BMCU feeder motor: BMCU_STOP CHANNEL=0")
+        self.gcode.register_command(
+            'BMCU_STATUS', self._cmd_status,
+            desc="Print per-channel BMCU status table")
+        self.gcode.register_command(
+            'BMCU_SPEED', self._cmd_speed,
+            desc="Set BMCU motor speed: BMCU_SPEED CHANNEL=0 SPEED=75")
+        self.gcode.register_command(
+            'BMCU_DIR', self._cmd_dir,
+            desc="Set BMCU motor direction: BMCU_DIR CHANNEL=0 DIR=FWD")
+
+    def _register_sensor_commands(self):
+        """Register per-channel SET_BMCU_SENSOR mux commands.
+
+        Called from _handle_connect after _channels is populated.
+        """
+        for ch_id, ch in self._channels.items():
+            self.gcode.register_mux_command(
+                'SET_BMCU_SENSOR', 'CHANNEL', str(ch_id),
+                ch.cmd_set_sensor,
+                desc="Enable/disable BMCU sensor for channel %d" % ch_id)
+
+    def _cmd_run(self, gcmd):
+        ch_id = gcmd.get_int('CHANNEL', minval=0, maxval=3)
+        if ch_id not in self._channels:
+            gcmd.respond_info("BMCU: channel %d not configured" % ch_id)
+            return
+        self._serial.send("RUN %d\n" % ch_id)
+
+    def _cmd_stop(self, gcmd):
+        ch_id = gcmd.get_int('CHANNEL', minval=0, maxval=3)
+        if ch_id not in self._channels:
+            gcmd.respond_info("BMCU: channel %d not configured" % ch_id)
+            return
+        self._serial.send("STOP %d\n" % ch_id)
+
+    def _cmd_speed(self, gcmd):
+        ch_id = gcmd.get_int('CHANNEL', minval=0, maxval=3)
+        speed = gcmd.get_int('SPEED', minval=0, maxval=100)
+        if ch_id not in self._channels:
+            gcmd.respond_info("BMCU: channel %d not configured" % ch_id)
+            return
+        self._serial.send("SPEED %d %d\n" % (ch_id, speed))
+
+    def _cmd_dir(self, gcmd):
+        ch_id = gcmd.get_int('CHANNEL', minval=0, maxval=3)
+        direction = gcmd.get('DIR')
+        if direction not in ('FWD', 'REV'):
+            raise gcmd.error("BMCU: DIR must be FWD or REV, got '%s'" % direction)
+        if ch_id not in self._channels:
+            gcmd.respond_info("BMCU: channel %d not configured" % ch_id)
+            return
+        self._serial.send("DIR %d %s\n" % (ch_id, direction))
+
+    def _cmd_status(self, gcmd):
+        lines = ["BMCU Status:"]
+        lines.append("%-4s %-8s %-7s %-6s %-5s %-9s %-8s" %
+                     ("CH", "Filament", "Motor", "Speed", "Dir", "Feed(mm)", "Magnet"))
+        lines.append("-" * 55)
+        for ch_id in sorted(self._channels.keys()):
+            s = self._channels[ch_id].state
+            lines.append("%-4d %-8s %-7s %-6d %-5s %-9.1f %-8s" % (
+                ch_id,
+                "present" if s.get('filament_present') else "absent",
+                "running" if s.get('motor_running') else "stopped",
+                s.get('speed', 0),
+                s.get('direction', 'FWD'),
+                s.get('feed_mm', 0.0),
+                s.get('mag_status', '?'),
+            ))
+        gcmd.respond_info('\n'.join(lines))
+
     def _poll_status(self, eventtime):
-        """Reactor timer callback — send STATUS query and reschedule."""
-        if self._serial is not None:
-            self._serial.send("STATUS\n")
+        """Reactor timer callback — drain queued lines, send STATUS query, reschedule."""
+        for kind, content in self._serial.get_lines():
+            if kind == 'ERROR':
+                self._handle_serial_error(content)
+            elif content.startswith('STATUS ok'):
+                self._dispatch_status_line(content)
+        self._serial.send("STATUS\n")
         return eventtime + self.poll_interval
+
+    def _dispatch_status_line(self, line):
+        """Parse a STATUS ok response and update per-channel state dicts."""
+        for m in _STATUS_FIELD_RE.finditer(line):
+            ch_id = int(m.group(1))
+            if ch_id not in self._channels:
+                continue
+            ch = self._channels[ch_id]
+            old_state = dict(ch.state)
+            ch.state.update({
+                'filament_present': m.group(2) == '1',
+                'motor_running':    m.group(3) == '1',
+                'speed':            int(m.group(4)),
+                'direction':        m.group(5),
+                'feed_mm':          float(m.group(6)),
+                'mag_status':       m.group(7),
+            })
+            self._check_events(ch, old_state)
+
+    def _check_events(self, ch, old_state):
+        pass  # Implemented in Plan 03
+
+    def _handle_serial_error(self, msg):
+        logging.error("BMCU serial error: %s" % msg)
 
     def get_status(self, eventtime):
         """Return a new dict each call for Moonraker change detection."""
