@@ -667,3 +667,122 @@ class TestBmcuEventDispatch:
         feeder._check_events(ch, old_state)
 
         assert len(reactor.callbacks) == 0, "runout must not fire when not printing"
+
+
+# ===========================================================================
+# Plan 02-03 Task 2: Blockage/stall detection (KL-13, KL-14)
+# ===========================================================================
+
+class TestBmcuStallDetection:
+    """Tests for blockage detection: feed_mm stall while motor running and filament present."""
+
+    def _make_feeder_with_channel(self, monkeypatch, stall_threshold_mm=0.5):
+        """Helper: build a connected BmcuFeeder with one stall-configured channel."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        ch_params = {
+            'extruder': 'extruder',
+            'runout_gcode': 'PAUSE',
+            'insert_gcode': 'RESUME',
+            'stall_gcode': 'M600',
+            'stall_threshold_mm': stall_threshold_mm,
+        }
+        ch_cfg = MockConfig(ch_params, name='bmcu_channel 0')
+        ch_cfg.printer = cfg.printer
+        cfg.printer.add_object('bmcu_channel 0', BmcuChannel(ch_cfg))
+        cfg.printer._objects['idle_timeout'] = MockIdleTimeout(state='Printing')
+        cfg.printer._objects['pause_resume'] = MockPauseResume()
+
+        monkeypatch.setattr(
+            'klippy.extras.bmcu_feeder.serial.Serial',
+            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+        )
+        feeder._handle_connect()
+        return feeder
+
+    def test_blockage_detect(self, monkeypatch):
+        """When filament_present=True, motor_running=True, and feed_mm unchanged, stall fires."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        # Set up: motor running, filament present, feed_mm = 10.0
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
+
+        # First call — establishes baseline in _prev_mm
+        old_state = dict(ch.state)
+        feeder._check_events(ch, old_state)
+        reactor.callbacks.clear()
+
+        # Second call — same feed_mm (no motion), should trigger stall
+        old_state2 = dict(ch.state)
+        feeder._check_events(ch, old_state2)
+
+        assert len(reactor.callbacks) == 1, "stall callback must be registered when feed_mm stalls"
+
+    def test_stall_gcode(self, monkeypatch):
+        """When blockage detected and stall_gcode configured, stall_gcode is rendered and run."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        gcode = feeder.gcode
+
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 5.0})
+
+        # First call — baseline
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+
+        # Second call — no motion
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 1, "stall callback must be registered"
+        reactor.callbacks[0](0.0)
+        assert len(gcode._scripts_run) == 1, "stall_gcode must be run"
+        assert 'M600' in gcode._scripts_run[0]
+
+    def test_no_stall_without_filament(self, monkeypatch):
+        """When filament_present=False, no blockage event fires even if feed_mm is unchanged."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': False, 'motor_running': True, 'feed_mm': 3.0})
+
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+        feeder._check_events(ch, dict(ch.state))
+
+        assert len(reactor.callbacks) == 0, "no stall when filament absent"
+
+    def test_no_stall_motor_stopped(self, monkeypatch):
+        """When motor_running=False, no blockage event fires even if feed_mm is unchanged."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': False, 'feed_mm': 3.0})
+
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+        feeder._check_events(ch, dict(ch.state))
+
+        assert len(reactor.callbacks) == 0, "no stall when motor stopped"
+
+    def test_stall_threshold_configurable(self, monkeypatch):
+        """Channel with stall_threshold_mm=0.1 detects blockage at smaller delta than default 0.5."""
+        feeder = self._make_feeder_with_channel(monkeypatch, stall_threshold_mm=0.1)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 0.0})
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+
+        # Move 0.05 mm — below threshold of 0.1, should still stall
+        ch.state['feed_mm'] = 0.05
+        feeder._check_events(ch, dict(ch.state))
+
+        assert len(reactor.callbacks) == 1, "stall must detect delta < stall_threshold_mm=0.1"
