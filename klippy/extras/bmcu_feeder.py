@@ -326,6 +326,19 @@ class BmcuFeeder:
                 ch.min_event_systime = self.reactor.NEVER
                 self.reactor.register_callback(
                     lambda et, c=ch: self._insert_handler(et, c))
+        # Blockage: filament present + motor running + no motion
+        if ch.state['filament_present'] and ch.state['motor_running']:
+            if ch.channel_id in self._prev_mm:
+                prev = self._prev_mm[ch.channel_id]
+                delta = abs(ch.state['feed_mm'] - prev)
+                if delta < ch.stall_threshold_mm and ch.stall_gcode is not None:
+                    if now >= ch.min_event_systime and ch.sensor_enabled:
+                        ch.min_event_systime = self.reactor.NEVER
+                        logging.info("BMCU ch%d: blockage detected (delta_mm=%.2f)" %
+                                     (ch.channel_id, delta))
+                        self.reactor.register_callback(
+                            lambda et, c=ch: self._stall_handler(et, c))
+        self._prev_mm[ch.channel_id] = ch.state['feed_mm']
 
     def _runout_handler(self, eventtime, ch):
         if ch.pause_on_runout:
@@ -335,6 +348,9 @@ class BmcuFeeder:
 
     def _insert_handler(self, eventtime, ch):
         self._exec_gcode(ch, ch.insert_gcode)
+
+    def _stall_handler(self, eventtime, ch):
+        self._exec_gcode(ch, ch.stall_gcode)
 
     def _exec_gcode(self, ch, template):
         try:
