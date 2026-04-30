@@ -196,9 +196,11 @@ class TestBmcuChannel:
 
 class TestBmcuFeeder:
 
+    _VALID_SERIAL = '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-port0'
+
     def _make_feeder_config(self, extra=None, name="bmcu_feeder"):
         params = {
-            'serial': '/dev/ttyUSB0',
+            'serial': self._VALID_SERIAL,
         }
         if extra:
             params.update(extra)
@@ -211,7 +213,7 @@ class TestBmcuFeeder:
         cfg = self._make_feeder_config()
         feeder = BmcuFeeder(cfg)
 
-        assert feeder.serial_port == '/dev/ttyUSB0'
+        assert feeder.serial_port == self._VALID_SERIAL
         assert feeder.baud == 115200
         assert feeder.poll_interval == pytest.approx(0.5)
 
@@ -301,6 +303,9 @@ class TestBmcuFeeder:
 # Plan 02-02 Task 1: GCode command handlers (KL-03, KL-04, KL-05)
 # ===========================================================================
 
+_VALID_SERIAL = '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-port0'
+
+
 class TestBmcuGcodeCommands:
     """Tests for BMCU_RUN, BMCU_STOP, BMCU_SPEED, BMCU_DIR, BMCU_STATUS,
     SET_BMCU_SENSOR command handlers."""
@@ -309,7 +314,7 @@ class TestBmcuGcodeCommands:
         """Helper: build a connected BmcuFeeder with the given channel IDs."""
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
-        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
         feeder = BmcuFeeder(cfg)
 
         for ch_id in ch_ids:
@@ -422,7 +427,7 @@ class TestBmcuPolling:
         """Helper: build a connected BmcuFeeder with the given channel IDs."""
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
-        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
         feeder = BmcuFeeder(cfg)
 
         for ch_id in ch_ids:
@@ -530,7 +535,7 @@ class TestBmcuEventDispatch:
         """Helper: build a connected BmcuFeeder with event-enabled channels."""
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
-        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
         feeder = BmcuFeeder(cfg)
 
         for ch_id in ch_ids:
@@ -680,7 +685,7 @@ class TestBmcuStallDetection:
         """Helper: build a connected BmcuFeeder with one stall-configured channel."""
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
-        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
         feeder = BmcuFeeder(cfg)
 
         ch_params = {
@@ -799,7 +804,7 @@ class TestBmcuGetStatus:
         """Helper: build a connected BmcuFeeder with the given channel IDs."""
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
-        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
         feeder = BmcuFeeder(cfg)
 
         for ch_id in ch_ids:
@@ -914,3 +919,51 @@ class TestBmcuGetStatus:
 
         assert len(reactor.callbacks) == 0, \
             "no runout callback must be registered when motor_running=False"
+
+
+# ===========================================================================
+# Plan 02-04 Task 2: Serial path validation (prevents bare ttyUSB pitfall)
+# ===========================================================================
+
+class TestBmcuSerialPathValidation:
+    """Tests for serial path validation in BmcuFeeder.__init__."""
+
+    def test_serial_path_validation_rejects_ttyUSB(self):
+        """Creating BmcuFeeder with serial='/dev/ttyUSB0' raises config error containing 'by-path'."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder
+        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        with pytest.raises(Exception) as exc_info:
+            BmcuFeeder(cfg)
+        assert 'by-path' in str(exc_info.value), \
+            "Error message must contain 'by-path' to guide user to stable path"
+
+    def test_serial_path_validation_rejects_ttyACM(self):
+        """Creating BmcuFeeder with serial='/dev/ttyACM0' raises config error containing 'by-path'."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder
+        cfg = MockConfig({'serial': '/dev/ttyACM0'}, name='bmcu_feeder')
+        with pytest.raises(Exception) as exc_info:
+            BmcuFeeder(cfg)
+        assert 'by-path' in str(exc_info.value), \
+            "Error message must contain 'by-path' for ttyACM paths too"
+
+    def test_serial_path_validation_accepts_by_path(self):
+        """Creating BmcuFeeder with serial='/dev/serial/by-path/...' does not raise."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder
+        cfg = MockConfig(
+            {'serial': '/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-port0'},
+            name='bmcu_feeder'
+        )
+        # Should not raise — by-path is acceptable
+        feeder = BmcuFeeder(cfg)
+        assert feeder.serial_port.startswith('/dev/serial/by-path/')
+
+    def test_serial_path_validation_accepts_by_id(self):
+        """Creating BmcuFeeder with serial='/dev/serial/by-id/...' does not raise."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder
+        cfg = MockConfig(
+            {'serial': '/dev/serial/by-id/usb-1a86_USB2.0-Ser_-if00-port0'},
+            name='bmcu_feeder'
+        )
+        # Should not raise — by-id is also acceptable
+        feeder = BmcuFeeder(cfg)
+        assert feeder.serial_port.startswith('/dev/serial/by-id/')
