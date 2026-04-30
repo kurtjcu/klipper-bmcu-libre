@@ -3,13 +3,15 @@ Unit tests for klippy/extras/bmcu_feeder.py
 
 Task 1: BmcuSerial (6 tests, KL-01)
 Task 2: BmcuChannel, BmcuFeeder config and lifecycle (6 tests, KL-02)
+Plan 02-02 Task 1: GCode command handlers (6 tests, KL-03/04/05)
+Plan 02-02 Task 2: Polling timer and STATUS parser (4 tests, KL-10/15)
 """
 
 import pytest
 from unittest.mock import patch, MagicMock
 
 from klippy.extras.bmcu_feeder import BmcuSerial
-from tests.conftest import MockSerial, MockReactor, MockConfig, MockPrinter
+from tests.conftest import MockSerial, MockReactor, MockConfig, MockPrinter, MockGcmd
 
 
 # ===========================================================================
@@ -292,3 +294,222 @@ class TestBmcuFeeder:
         assert feeder._serial is None, "_serial must be None after disconnect"
         assert len(reactor._timers) == 0, "poll timer must be unregistered"
         assert len(reactor.registered_fds) == 0, "fd must be unregistered after disconnect"
+
+
+# ===========================================================================
+# Plan 02-02 Task 1: GCode command handlers (KL-03, KL-04, KL-05)
+# ===========================================================================
+
+class TestBmcuGcodeCommands:
+    """Tests for BMCU_RUN, BMCU_STOP, BMCU_SPEED, BMCU_DIR, BMCU_STATUS,
+    SET_BMCU_SENSOR command handlers."""
+
+    def _make_feeder_with_channels(self, monkeypatch, ch_ids=(0,)):
+        """Helper: build a connected BmcuFeeder with the given channel IDs."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        for ch_id in ch_ids:
+            ch_cfg = MockConfig({'extruder': 'extruder'}, name='bmcu_channel %d' % ch_id)
+            ch_cfg.printer = cfg.printer
+            cfg.printer.add_object('bmcu_channel %d' % ch_id, BmcuChannel(ch_cfg))
+
+        serial_instances = []
+
+        def mock_serial_cls(port, baud, timeout):
+            ms = MockSerial(port, baud, timeout)
+            serial_instances.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        feeder._handle_connect()
+        return feeder, serial_instances
+
+    def test_cmd_run(self, monkeypatch):
+        """BMCU_RUN CHANNEL=0 sends 'RUN 0\\n'; CHANNEL=2 sends 'RUN 2\\n'."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(0, 2))
+        ms = serials[0]
+
+        gcmd = MockGcmd({'CHANNEL': 0})
+        feeder._cmd_run(gcmd)
+        assert ms._written == b"RUN 0\n", "BMCU_RUN CHANNEL=0 must write 'RUN 0\\n'"
+
+        ms._written = b""
+        gcmd2 = MockGcmd({'CHANNEL': 2})
+        feeder._cmd_run(gcmd2)
+        assert ms._written == b"RUN 2\n", "BMCU_RUN CHANNEL=2 must write 'RUN 2\\n'"
+
+    def test_cmd_stop(self, monkeypatch):
+        """BMCU_STOP CHANNEL=1 sends 'STOP 1\\n'."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(1,))
+        ms = serials[0]
+
+        gcmd = MockGcmd({'CHANNEL': 1})
+        feeder._cmd_stop(gcmd)
+        assert ms._written == b"STOP 1\n", "BMCU_STOP CHANNEL=1 must write 'STOP 1\\n'"
+
+    def test_cmd_speed(self, monkeypatch):
+        """BMCU_SPEED CHANNEL=0 SPEED=75 sends 'SPEED 0 75\\n'."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        ms = serials[0]
+
+        gcmd = MockGcmd({'CHANNEL': 0, 'SPEED': 75})
+        feeder._cmd_speed(gcmd)
+        assert ms._written == b"SPEED 0 75\n", "BMCU_SPEED CHANNEL=0 SPEED=75 must write 'SPEED 0 75\\n'"
+
+    def test_cmd_dir(self, monkeypatch):
+        """BMCU_DIR CHANNEL=0 DIR=REV sends 'DIR 0 REV\\n'."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        ms = serials[0]
+
+        gcmd = MockGcmd({'CHANNEL': 0, 'DIR': 'REV'})
+        feeder._cmd_dir(gcmd)
+        assert ms._written == b"DIR 0 REV\n", "BMCU_DIR CHANNEL=0 DIR=REV must write 'DIR 0 REV\\n'"
+
+    def test_cmd_status(self, monkeypatch):
+        """BMCU_STATUS responds with header, column headers, separator, and data rows."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        # Pre-populate channel state with known values
+        feeder._channels[0].state.update({
+            'filament_present': True,
+            'motor_running': True,
+            'speed': 75,
+            'direction': 'FWD',
+            'feed_mm': 142.5,
+            'mag_status': 'ok',
+        })
+
+        gcmd = MockGcmd({})
+        feeder._cmd_status(gcmd)
+
+        assert len(gcmd._responses) == 1
+        output = gcmd._responses[0]
+        assert "BMCU Status:" in output, "Status output must contain 'BMCU Status:' header"
+        assert "CH" in output and "Filament" in output and "Motor" in output, \
+            "Status output must contain column headers"
+        assert "-" * 55 in output, "Status output must contain 55-hyphen separator"
+        # Data row checks
+        assert "present" in output
+        assert "running" in output
+        assert "142.5" in output
+
+    def test_set_sensor(self, monkeypatch):
+        """SET_BMCU_SENSOR CHANNEL=0 ENABLE=0 sets sensor_enabled=False; ENABLE=1 restores True."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        ch = feeder._channels[0]
+        assert ch.sensor_enabled is True
+
+        gcmd_off = MockGcmd({'ENABLE': 0})
+        ch.cmd_set_sensor(gcmd_off)
+        assert ch.sensor_enabled is False, "ENABLE=0 must set sensor_enabled=False"
+
+        gcmd_on = MockGcmd({'ENABLE': 1})
+        ch.cmd_set_sensor(gcmd_on)
+        assert ch.sensor_enabled is True, "ENABLE=1 must set sensor_enabled=True"
+
+
+# ===========================================================================
+# Plan 02-02 Task 2: Polling timer and STATUS response parser (KL-10, KL-15)
+# ===========================================================================
+
+class TestBmcuPolling:
+    """Tests for _poll_status and _dispatch_status_line."""
+
+    def _make_feeder_with_channels(self, monkeypatch, ch_ids=(0,)):
+        """Helper: build a connected BmcuFeeder with the given channel IDs."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        for ch_id in ch_ids:
+            ch_cfg = MockConfig({'extruder': 'extruder'}, name='bmcu_channel %d' % ch_id)
+            ch_cfg.printer = cfg.printer
+            cfg.printer.add_object('bmcu_channel %d' % ch_id, BmcuChannel(ch_cfg))
+
+        serial_instances = []
+
+        def mock_serial_cls(port, baud, timeout):
+            ms = MockSerial(port, baud, timeout)
+            serial_instances.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        feeder._handle_connect()
+        return feeder, serial_instances
+
+    def test_poll_sends_status(self, monkeypatch):
+        """_poll_status writes 'STATUS\\n' and returns eventtime + poll_interval."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch)
+        ms = serials[0]
+
+        # No queued lines
+        ms._read_data = b""
+
+        result = feeder._poll_status(10.0)
+        assert b"STATUS\n" in ms._written, "_poll_status must send 'STATUS\\n'"
+        assert result == pytest.approx(10.0 + feeder.poll_interval), \
+            "_poll_status must return eventtime + poll_interval"
+
+    def test_poll_dispatches_lines(self, monkeypatch):
+        """When serial has a STATUS line for ch=0, _poll_status updates channel 0 state."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+
+        # Directly inject a line into the serial's line buffer (bypass fd reading)
+        feeder._serial._lines = [
+            ('LINE', 'STATUS ok ch=0 fil=1 mot=1 spd=50 dir=FWD mm=142.5 mag=ok')
+        ]
+
+        feeder._poll_status(0.0)
+
+        s = feeder._channels[0].state
+        assert s['filament_present'] is True
+        assert s['motor_running'] is True
+        assert s['speed'] == 50
+        assert s['direction'] == 'FWD'
+        assert s['feed_mm'] == pytest.approx(142.5)
+        assert s['mag_status'] == 'ok'
+
+    def test_poll_multi_channel(self, monkeypatch):
+        """Multi-channel STATUS line updates both channel 0 and channel 1."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(0, 1))
+
+        feeder._serial._lines = [
+            ('LINE',
+             'STATUS ok ch=0 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok '
+             'ch=1 fil=0 mot=1 spd=75 dir=REV mm=50.3 mag=ok')
+        ]
+
+        feeder._poll_status(0.0)
+
+        s0 = feeder._channels[0].state
+        assert s0['filament_present'] is True
+        assert s0['motor_running'] is False
+        assert s0['speed'] == 0
+        assert s0['direction'] == 'FWD'
+
+        s1 = feeder._channels[1].state
+        assert s1['filament_present'] is False
+        assert s1['motor_running'] is True
+        assert s1['speed'] == 75
+        assert s1['direction'] == 'REV'
+        assert s1['feed_mm'] == pytest.approx(50.3)
+
+    def test_poll_ignores_unconfigured(self, monkeypatch):
+        """STATUS data for channel 3 is ignored when only channels 0 and 1 are configured."""
+        feeder, serials = self._make_feeder_with_channels(monkeypatch, ch_ids=(0, 1))
+
+        feeder._serial._lines = [
+            ('LINE',
+             'STATUS ok ch=0 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok '
+             'ch=3 fil=1 mot=1 spd=50 dir=FWD mm=10.0 mag=fault')
+        ]
+
+        feeder._poll_status(0.0)
+
+        # Channel 3 must not exist in _channels
+        assert 3 not in feeder._channels, "Unconfigured channel 3 must not be added"
+        # Channel 0 should be updated
+        assert feeder._channels[0].state['filament_present'] is True
