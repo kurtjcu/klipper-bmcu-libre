@@ -306,7 +306,42 @@ class BmcuFeeder:
             self._check_events(ch, old_state)
 
     def _check_events(self, ch, old_state):
-        pass  # Implemented in Plan 03
+        now = self.reactor.monotonic()
+        if now < ch.min_event_systime or not ch.sensor_enabled:
+            return
+        old_fil = old_state.get('filament_present')
+        new_fil = ch.state['filament_present']
+        # Runout: was present, now absent — only during printing
+        if old_fil and not new_fil:
+            idle_timeout = self.printer.lookup_object('idle_timeout')
+            is_printing = idle_timeout.get_status(now)['state'] == 'Printing'
+            if is_printing and ch.runout_gcode is not None:
+                ch.min_event_systime = self.reactor.NEVER
+                self.reactor.register_callback(
+                    lambda et, c=ch: self._runout_handler(et, c))
+        # Insert: was absent, now present — fires unconditionally
+        # (user always wants to know filament is back, regardless of print state)
+        elif not old_fil and new_fil:
+            if ch.insert_gcode is not None:
+                ch.min_event_systime = self.reactor.NEVER
+                self.reactor.register_callback(
+                    lambda et, c=ch: self._insert_handler(et, c))
+
+    def _runout_handler(self, eventtime, ch):
+        if ch.pause_on_runout:
+            pause_resume = self.printer.lookup_object('pause_resume')
+            pause_resume.send_pause_command()
+        self._exec_gcode(ch, ch.runout_gcode)
+
+    def _insert_handler(self, eventtime, ch):
+        self._exec_gcode(ch, ch.insert_gcode)
+
+    def _exec_gcode(self, ch, template):
+        try:
+            self.gcode.run_script("" + template.render() + "\nM400")
+        except Exception:
+            logging.exception("BMCU: script error on channel %d" % ch.channel_id)
+        ch.min_event_systime = self.reactor.monotonic() + ch.event_delay
 
     def _handle_serial_error(self, msg):
         logging.error("BMCU serial error: %s" % msg)

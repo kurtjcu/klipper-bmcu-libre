@@ -257,9 +257,36 @@ class MockGcmd:
 
 
 # ---------------------------------------------------------------------------
+# Mock idle_timeout
+# ---------------------------------------------------------------------------
+
+class MockIdleTimeout:
+    def __init__(self, state='Ready'):
+        self._state = state
+
+    def get_status(self, eventtime):
+        return {'state': self._state}
+
+
+# ---------------------------------------------------------------------------
+# Mock pause_resume
+# ---------------------------------------------------------------------------
+
+class MockPauseResume:
+    def __init__(self):
+        self.pause_called = False
+
+    def send_pause_command(self):
+        self.pause_called = True
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def mock_printer():
-    return MockPrinter()
+    p = MockPrinter()
+    p._objects['idle_timeout'] = MockIdleTimeout()
+    p._objects['pause_resume'] = MockPauseResume()
+    return p
