@@ -23,11 +23,27 @@
 /* Upstream AS5600 instance defined in Motion_control.cpp */
 extern AS5600_soft_IIC_many MC_AS5600;
 
+/* ---------- feed distance calibration constant ---------- */
+
+#ifndef GEAR_CIRCUMFERENCE_MM
+#define GEAR_CIRCUMFERENCE_MM 30.0f  /* placeholder — measure on physical hardware */
+#endif
+
 /* ---------- module-level motor state ---------- */
 
 static bool motor_running[4] = {false, false, false, false};
 static int  motor_speed[4]   = {0, 0, 0, 0};
 static int  motor_dir[4]     = {1, 1, 1, 1};  /* +1=FWD, -1=REV */
+
+/* ---------- feed distance tracking state ---------- */
+
+static int32_t  feed_counts[4]        = {0, 0, 0, 0};
+static uint16_t prev_angle[4]         = {0, 0, 0, 0};
+static bool     angle_initialized[4]  = {false, false, false, false};
+
+/* ---------- AS5600 boot health state ---------- */
+
+static int as5600_boot_status[4] = {0, 0, 0, 0};  /* cached at boot */
 
 /* ---------- RX line buffer ---------- */
 
@@ -59,6 +75,49 @@ static uint8_t usart2_rx_byte(void) {
     return (uint8_t)(USART2->DATAR & 0xFF);
 }
 
+/* ---------- feed distance functions ---------- */
+
+static void update_feed_distance(int ch) {
+    uint16_t now = MC_AS5600.raw_angle[ch];
+    if (!angle_initialized[ch]) {
+        prev_angle[ch] = now;
+        angle_initialized[ch] = true;
+        return;
+    }
+    int16_t delta = (int16_t)(now - prev_angle[ch]);
+    feed_counts[ch] += delta;
+    prev_angle[ch] = now;
+}
+
+static float get_feed_mm(int ch) {
+    return (feed_counts[ch] / 4096.0f) * GEAR_CIRCUMFERENCE_MM;
+}
+
+/* ---------- AS5600 magnet status helpers ---------- */
+
+static const char* mag_status_str(int stu) {
+    switch (stu) {
+        case 0:  return "ok";
+        case 1:  return "low";
+        case 2:  return "high";
+        case -1: return "offline";
+        default: return "unknown";
+    }
+}
+
+static void send_boot_message(void) {
+    char buf[80];
+    for (int ch = 0; ch < 4; ch++) {
+        as5600_boot_status[ch] = (int)MC_AS5600.magnet_stu[ch];
+    }
+    snprintf(buf, sizeof(buf), "BOOT mag0=%s mag1=%s mag2=%s mag3=%s\n",
+        mag_status_str(as5600_boot_status[0]),
+        mag_status_str(as5600_boot_status[1]),
+        mag_status_str(as5600_boot_status[2]),
+        mag_status_str(as5600_boot_status[3]));
+    usart2_send_string(buf);
+}
+
 /* ---------- helpers ---------- */
 
 /*
@@ -88,23 +147,20 @@ static void send_status_response(void) {
     pos += snprintf(buf + pos, (int)sizeof(buf) - pos, "STATUS ok");
 
     for (int ch = 0; ch < 4; ch++) {
-        /* magnet status string */
-        const char *mag = "ok";
-        int mstu = (int)MC_AS5600.magnet_stu[ch];
-        if (mstu == 1)  mag = "low";
-        if (mstu == 2)  mag = "high";
-        if (mstu == -1) mag = "offline";
+        /* live magnet status (not cached boot status — may change while running) */
+        const char *mag = mag_status_str((int)MC_AS5600.magnet_stu[ch]);
 
         /* direction string */
         const char *dir_s = (motor_dir[ch] >= 0) ? "FWD" : "REV";
 
         pos += snprintf(buf + pos, (int)sizeof(buf) - pos,
-            " ch=%d fil=%d mot=%d spd=%d dir=%s mm=0.0 mag=%s",
+            " ch=%d fil=%d mot=%d spd=%d dir=%s mm=%.1f mag=%s",
             ch,
             filament_channel_inserted[ch] ? 1 : 0,
             motor_running[ch] ? 1 : 0,
             motor_speed[ch],
             dir_s,
+            get_feed_mm(ch),
             mag
         );
     }
@@ -277,9 +333,17 @@ void uart_protocol_init(void) {
     USART_Cmd(USART2, ENABLE);
 
     rx_pos = 0;
+
+    /* Report AS5600 magnet health on boot */
+    send_boot_message();
 }
 
 void uart_protocol_tick(void) {
+    /* Update feed distance accumulators before processing RX */
+    for (int ch = 0; ch < 4; ch++) {
+        update_feed_distance(ch);
+    }
+
     while (usart2_rx_available()) {
         char c = (char)usart2_rx_byte();
 
