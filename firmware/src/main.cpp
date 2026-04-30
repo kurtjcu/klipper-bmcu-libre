@@ -13,6 +13,9 @@
 #endif
 #include "ADC_DMA.h"
 #include "Debug_log.h"
+#ifdef UART_PROTOCOL_ENABLED
+#include "uart_protocol.h"
+#endif
 #include <string.h>
 
 WS2812_class SYS_RGB;
@@ -223,6 +226,9 @@ int main(void)
     }
 
     Motion_control_init();
+#ifdef UART_PROTOCOL_ENABLED
+    uart_protocol_init();
+#endif
 #ifndef DISABLE_BAMBUBUS
     bambubus_init();
     bus_init();
@@ -269,5 +275,8 @@ int main(void)
 
         Motion_control_run(error);
         RGB_update();
+#ifdef UART_PROTOCOL_ENABLED
+        uart_protocol_tick();
+#endif
     }
 }
