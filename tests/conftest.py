@@ -235,6 +235,28 @@ class MockConfig:
 
 
 # ---------------------------------------------------------------------------
+# Mock GCode command object
+# ---------------------------------------------------------------------------
+
+class MockGcmd:
+    def __init__(self, params=None):
+        self._params = params or {}
+        self._responses = []
+
+    def get_int(self, key, default=None, minval=None, maxval=None):
+        return int(self._params.get(key, default))
+
+    def get(self, key, default=None):
+        return self._params.get(key, default)
+
+    def respond_info(self, text):
+        self._responses.append(text)
+
+    def error(self, msg):
+        return Exception(msg)
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
