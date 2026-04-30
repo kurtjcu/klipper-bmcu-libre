@@ -11,7 +11,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from klippy.extras.bmcu_feeder import BmcuSerial
-from tests.conftest import MockSerial, MockReactor, MockConfig, MockPrinter, MockGcmd
+from tests.conftest import (MockSerial, MockReactor, MockConfig, MockPrinter, MockGcmd,
+                             MockIdleTimeout, MockPauseResume)
 
 
 # ===========================================================================
@@ -513,3 +514,156 @@ class TestBmcuPolling:
         assert 3 not in feeder._channels, "Unconfigured channel 3 must not be added"
         # Channel 0 should be updated
         assert feeder._channels[0].state['filament_present'] is True
+
+
+# ===========================================================================
+# Plan 02-03 Task 1: Event dispatch — runout, insert, event_delay, pause_on_runout
+# ===========================================================================
+
+class TestBmcuEventDispatch:
+    """Tests for KL-06, KL-07, KL-08, KL-09, KL-13, KL-14 event dispatch."""
+
+    def _make_feeder_with_channels(self, monkeypatch, ch_ids=(0,),
+                                   runout_gcode='PAUSE', insert_gcode='RESUME',
+                                   stall_gcode='M600',
+                                   pause_on_runout=True):
+        """Helper: build a connected BmcuFeeder with event-enabled channels."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        cfg = MockConfig({'serial': '/dev/ttyUSB0'}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        for ch_id in ch_ids:
+            ch_params = {
+                'extruder': 'extruder',
+                'runout_gcode': runout_gcode,
+                'insert_gcode': insert_gcode,
+                'stall_gcode': stall_gcode,
+                'pause_on_runout': pause_on_runout,
+            }
+            ch_cfg = MockConfig(ch_params, name='bmcu_channel %d' % ch_id)
+            ch_cfg.printer = cfg.printer
+            cfg.printer.add_object('bmcu_channel %d' % ch_id, BmcuChannel(ch_cfg))
+
+        # Register idle_timeout and pause_resume in the shared printer
+        cfg.printer._objects['idle_timeout'] = MockIdleTimeout(state='Printing')
+        cfg.printer._objects['pause_resume'] = MockPauseResume()
+
+        monkeypatch.setattr(
+            'klippy.extras.bmcu_feeder.serial.Serial',
+            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+        )
+        feeder._handle_connect()
+        return feeder
+
+    def test_runout_event(self, monkeypatch):
+        """When filament transitions present->absent during printing, runout_gcode fires."""
+        feeder = self._make_feeder_with_channels(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        gcode = feeder.gcode
+
+        # Set up: filament was present
+        old_state = dict(ch.state)
+        old_state['filament_present'] = True
+        ch.state['filament_present'] = False
+
+        feeder._check_events(ch, old_state)
+
+        # A callback must have been registered
+        assert len(reactor.callbacks) == 1, "runout callback must be registered"
+        # Execute the callback
+        reactor.callbacks[0](0.0)
+        assert len(gcode._scripts_run) == 1, "runout_gcode must be run"
+        assert 'PAUSE' in gcode._scripts_run[0]
+
+    def test_insert_event(self, monkeypatch):
+        """When filament transitions absent->present, insert_gcode fires regardless of print state."""
+        feeder = self._make_feeder_with_channels(monkeypatch)
+        # Change idle_timeout to Ready (not printing) — insert should still fire
+        feeder.printer.lookup_object('idle_timeout')._state = 'Ready'
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        gcode = feeder.gcode
+
+        old_state = dict(ch.state)
+        old_state['filament_present'] = False
+        ch.state['filament_present'] = True
+
+        feeder._check_events(ch, old_state)
+
+        assert len(reactor.callbacks) == 1, "insert callback must be registered"
+        reactor.callbacks[0](0.0)
+        assert len(gcode._scripts_run) == 1, "insert_gcode must be run"
+        assert 'RESUME' in gcode._scripts_run[0]
+
+    def test_event_delay(self, monkeypatch):
+        """After a runout event fires, a second state change within event_delay is suppressed."""
+        feeder = self._make_feeder_with_channels(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        # First runout
+        old_state = dict(ch.state)
+        old_state['filament_present'] = True
+        ch.state['filament_present'] = False
+        feeder._check_events(ch, old_state)
+        assert len(reactor.callbacks) == 1, "first event must register callback"
+
+        # Execute callback to set min_event_systime
+        reactor.callbacks[0](0.0)
+        reactor.callbacks.clear()
+
+        # Immediately attempt insert while still within event_delay window
+        # monotonic() returns 0.0 and event_delay defaults to 3.0 so min_event_systime > 0
+        old_state2 = dict(ch.state)
+        old_state2['filament_present'] = False
+        ch.state['filament_present'] = True
+        feeder._check_events(ch, old_state2)
+
+        assert len(reactor.callbacks) == 0, "second event within event_delay must be suppressed"
+
+    def test_pause_on_runout(self, monkeypatch):
+        """When pause_on_runout=True, send_pause_command() is called before runout_gcode."""
+        feeder = self._make_feeder_with_channels(monkeypatch, pause_on_runout=True)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        pause_resume = feeder.printer.lookup_object('pause_resume')
+
+        old_state = dict(ch.state)
+        old_state['filament_present'] = True
+        ch.state['filament_present'] = False
+        feeder._check_events(ch, old_state)
+
+        assert len(reactor.callbacks) == 1
+        reactor.callbacks[0](0.0)
+        assert pause_resume.pause_called is True, "pause_resume.send_pause_command() must be called"
+
+    def test_sensor_disabled_no_events(self, monkeypatch):
+        """When sensor_enabled=False, filament state changes do NOT trigger any events."""
+        feeder = self._make_feeder_with_channels(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        ch.sensor_enabled = False
+
+        old_state = dict(ch.state)
+        old_state['filament_present'] = True
+        ch.state['filament_present'] = False
+        feeder._check_events(ch, old_state)
+
+        assert len(reactor.callbacks) == 0, "disabled sensor must not fire events"
+
+    def test_runout_only_when_printing(self, monkeypatch):
+        """When filament is removed but idle_timeout state is 'Ready', runout does NOT fire."""
+        feeder = self._make_feeder_with_channels(monkeypatch)
+        # Override to Ready (not printing)
+        feeder.printer.lookup_object('idle_timeout')._state = 'Ready'
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        old_state = dict(ch.state)
+        old_state['filament_present'] = True
+        ch.state['filament_present'] = False
+        feeder._check_events(ch, old_state)
+
+        assert len(reactor.callbacks) == 0, "runout must not fire when not printing"
