@@ -18,7 +18,7 @@ import re
 # ---------------------------------------------------------------------------
 
 _STATUS_FIELD_RE = re.compile(
-    r'ch=(\d) fil=(\d) mot=(\d) spd=(\d+) dir=(\w+) mm=([\d.]+) mag=(\w+)')
+    r'ch=(\d) fil=(\d) mot=(\d) spd=(\d+) dir=(\w+) mm=(-?[\d.]+) mag=(\w+)')
 
 logger = logging.getLogger(__name__)
 

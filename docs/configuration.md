@@ -23,7 +23,7 @@ Replace `YOUR_PATH_HERE` with the full path from `ls /dev/serial/by-path/`. See 
 
 ```ini
 # Add to your printer.cfg:
-[include config/bmcu_generic.cfg]
+[include bmcu/bmcu_generic.cfg]
 ```
 
 Then edit `config/bmcu_generic.cfg` and update the `serial:` path.
@@ -81,7 +81,7 @@ Buffer mode integrates the BMCU with [viesturz/klipper-toolchanger](https://gith
 
 ```ini
 # Add to printer.cfg:
-[include config/bmcu_buffer_tapchanger.cfg]
+[include bmcu/bmcu_buffer_tapchanger.cfg]
 ```
 
 Then merge the `[toolchanger]` gcode sections from `config/bmcu_buffer_tapchanger.cfg` with your existing `[toolchanger]` section, and add the `params_bmcu_channel`, `pickup_gcode`, and `dropoff_gcode` lines to each of your `[tool Tx]` sections as shown in that file.
