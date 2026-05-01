@@ -81,10 +81,8 @@ After flashing, unplug and replug the USB-C cable to let the firmware start in n
 # Open a serial terminal at 115200 baud:
 screen /dev/serial/by-path/YOUR_PATH_HERE 115200
 
-# Type STATUS and press Enter. You should see per-channel output like:
-# CH:0 fil=1 run=0 mm=0.00 mag=1
-# CH:1 fil=0 run=0 mm=0.00 mag=1
-# ...
+# Type STATUS and press Enter. You should see output like:
+# STATUS ok ch=0 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok ch=1 fil=0 mot=0 spd=0 dir=FWD mm=0.0 mag=ok ...
 
 # Press Ctrl-A then K to exit screen.
 ```

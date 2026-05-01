@@ -3,15 +3,19 @@
 #
 # Usage: ./install.sh
 #
-# Creates a symlink from this repo's klippy/extras/bmcu_feeder.py into
-# your Klipper installation. Survives Klipper updates (unlike a copy).
+# Creates symlinks from this repo into your Klipper installation:
+#   - klippy/extras/bmcu_feeder.py
+#   - klippy/extras/bmcu_channel.py
+#   - config/ directory into Klipper config path
+#
+# Survives Klipper updates (unlike a copy).
 
 set -e
 
 KLIPPER_DIR="${KLIPPER_DIR:-$HOME/klipper}"
+KLIPPER_CONFIG="${KLIPPER_CONFIG:-$HOME/printer_data/config}"
 EXTRAS_DIR="$KLIPPER_DIR/klippy/extras"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOURCE="$SCRIPT_DIR/klippy/extras/bmcu_feeder.py"
 
 if [ ! -d "$EXTRAS_DIR" ]; then
     echo "ERROR: Klipper extras directory not found at $EXTRAS_DIR"
@@ -20,23 +24,47 @@ if [ ! -d "$EXTRAS_DIR" ]; then
     exit 1
 fi
 
-if [ ! -f "$SOURCE" ]; then
-    echo "ERROR: bmcu_feeder.py not found at $SOURCE"
-    exit 1
+# --- Symlink Klipper extras ---
+
+link_extra() {
+    local name="$1"
+    local source="$SCRIPT_DIR/klippy/extras/$name"
+    local target="$EXTRAS_DIR/$name"
+
+    if [ ! -f "$source" ]; then
+        echo "ERROR: $name not found at $source"
+        exit 1
+    fi
+
+    if [ -L "$target" ] || [ -f "$target" ]; then
+        rm "$target"
+    fi
+
+    ln -s "$source" "$target"
+    echo "Linked: $target -> $source"
+}
+
+link_extra "bmcu_feeder.py"
+link_extra "bmcu_channel.py"
+
+# --- Symlink config directory ---
+
+if [ -d "$KLIPPER_CONFIG" ]; then
+    CONFIG_LINK="$KLIPPER_CONFIG/bmcu"
+    if [ -L "$CONFIG_LINK" ] || [ -d "$CONFIG_LINK" ]; then
+        rm -rf "$CONFIG_LINK"
+    fi
+    ln -s "$SCRIPT_DIR/config" "$CONFIG_LINK"
+    echo "Linked: $CONFIG_LINK -> $SCRIPT_DIR/config"
+else
+    echo ""
+    echo "NOTE: Klipper config directory not found at $KLIPPER_CONFIG"
+    echo "Set KLIPPER_CONFIG to symlink config files automatically:"
+    echo "  KLIPPER_CONFIG=/path/to/config ./install.sh"
+    echo ""
+    echo "Or copy config files manually:"
+    echo "  cp -r $SCRIPT_DIR/config/ $YOUR_CONFIG_DIR/bmcu/"
 fi
-
-TARGET="$EXTRAS_DIR/bmcu_feeder.py"
-
-if [ -L "$TARGET" ]; then
-    echo "Updating existing symlink..."
-    rm "$TARGET"
-elif [ -f "$TARGET" ]; then
-    echo "Replacing existing file with symlink..."
-    rm "$TARGET"
-fi
-
-ln -s "$SOURCE" "$TARGET"
-echo "Linked: $TARGET -> $SOURCE"
 
 echo ""
 echo "Install complete. Restart Klipper to load the extra:"

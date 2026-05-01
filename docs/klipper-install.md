@@ -31,7 +31,7 @@ Copy the full path — you will need it for `printer.cfg`.
 
 ```ini
 # Add to your printer.cfg:
-[include config/bmcu_generic.cfg]
+[include bmcu/bmcu_generic.cfg]
 ```
 
 Then edit `config/bmcu_generic.cfg` (or inline the sections) and replace the example `serial:` path with your actual by-path value from step 2.
