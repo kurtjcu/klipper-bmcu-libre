@@ -1,13 +1,17 @@
 # Klipper Installation
 
-## 1. Copy the Klipper extra
+## 1. Clone and install
 
 ```bash
-# Copy bmcu_feeder.py into Klipper's extras directory:
-cp klippy/extras/bmcu_feeder.py ~/klipper/klippy/extras/
+cd ~
+git clone https://github.com/kurtjcu/klipper-bmcu-libre.git
+cd klipper-bmcu-libre
+./install.sh
 ```
 
-> If your Klipper installation is not at `~/klipper/`, adjust the destination path accordingly. The file must end up in the `klippy/extras/` directory within your Klipper installation.
+This symlinks `bmcu_feeder.py` into your Klipper extras directory. Unlike a copy, the symlink survives Klipper updates.
+
+> If Klipper is not at `~/klipper/`, set the path: `KLIPPER_DIR=/path/to/klipper ./install.sh`
 
 ## 2. Find your serial path
 
@@ -93,6 +97,22 @@ sudo udevadm control --reload && sudo udevadm trigger
 ```
 
 Replace `1-1.1:1.0` with the `KERNELS` value from your own `udevadm info` output. This ensures the rule matches only the BMCU connected to that specific USB port, not other CH340 devices.
+
+## Automatic updates via Moonraker
+
+Add this to your `moonraker.conf` to get updates through Mainsail/Fluidd:
+
+```ini
+[update_manager bmcu]
+type: git_repo
+path: ~/klipper-bmcu-libre
+origin: https://github.com/kurtjcu/klipper-bmcu-libre.git
+primary_branch: main
+install_script: install.sh
+managed_services: klipper
+```
+
+Moonraker will check for updates and re-run `install.sh` automatically when you update.
 
 ## Next step
 
