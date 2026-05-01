@@ -105,6 +105,13 @@ class BmcuChannel:
         self.pause_on_runout = config.getboolean('pause_on_runout', True)
         self.stall_threshold_mm = config.getfloat('stall_threshold_mm', 0.5,
                                                    minval=0.1)
+        self.stall_debounce_count = config.getint('stall_debounce_count', 3,
+                                                   minval=1)
+        self.stall_startup_ignore_polls = config.getint(
+            'stall_startup_ignore_polls', 2, minval=0)
+        self._stall_counter = 0
+        self._startup_polls_remaining = 0
+        self._direction_just_changed = False
         self.sensor_enabled = True
         self.min_event_systime = 0.
         self.runout_gcode = gcode_macro.load_template(config, 'runout_gcode', '')
@@ -333,18 +340,49 @@ class BmcuFeeder:
                 ch.min_event_systime = self.reactor.NEVER
                 self.reactor.register_callback(
                     lambda et, c=ch: self._insert_handler(et, c))
-        # Blockage: filament present + motor running + no motion
+        # --- Motor start detection: reset startup grace and stall counter ---
+        old_mot = old_state.get('motor_running', False)
+        new_mot = ch.state['motor_running']
+        if not old_mot and new_mot:
+            ch._startup_polls_remaining = ch.stall_startup_ignore_polls
+            ch._stall_counter = 0
+
+        # --- Direction-change detection: reset _prev_mm and set suppression flag ---
+        old_dir = old_state.get('direction', 'FWD')
+        new_dir = ch.state['direction']
+        if old_dir != new_dir:
+            self._prev_mm[ch.channel_id] = ch.state['feed_mm']
+            ch._stall_counter = 0
+            ch._direction_just_changed = True
+
+        # --- Debounced blockage detection ---
         if ch.state['filament_present'] and ch.state['motor_running']:
             if ch.channel_id in self._prev_mm:
-                prev = self._prev_mm[ch.channel_id]
-                delta = abs(ch.state['feed_mm'] - prev)
-                if delta < ch.stall_threshold_mm and ch.stall_gcode is not None:
-                    if now >= ch.min_event_systime and ch.sensor_enabled:
-                        ch.min_event_systime = self.reactor.NEVER
-                        logging.info("BMCU ch%d: blockage detected (delta_mm=%.2f)" %
-                                     (ch.channel_id, delta))
-                        self.reactor.register_callback(
-                            lambda et, c=ch: self._stall_handler(et, c))
+                delta = abs(ch.state['feed_mm'] - self._prev_mm[ch.channel_id])
+                if ch._direction_just_changed:
+                    # Skip stall-counter evaluation on the direction-change poll.
+                    ch._direction_just_changed = False
+                elif ch._startup_polls_remaining > 0:
+                    ch._startup_polls_remaining -= 1
+                    ch._stall_counter = 0
+                elif delta < ch.stall_threshold_mm:
+                    ch._stall_counter += 1
+                else:
+                    ch._stall_counter = 0
+                if (ch._stall_counter >= ch.stall_debounce_count
+                        and ch.stall_gcode is not None
+                        and now >= ch.min_event_systime
+                        and ch.sensor_enabled):
+                    ch._stall_counter = 0
+                    ch.min_event_systime = self.reactor.NEVER
+                    logging.info("BMCU ch%d: blockage detected (delta_mm=%.2f)" %
+                                 (ch.channel_id, delta))
+                    self.reactor.register_callback(
+                        lambda et, c=ch: self._stall_handler(et, c))
+        else:
+            ch._stall_counter = 0
+            ch._startup_polls_remaining = 0
+            ch._direction_just_changed = False
         self._prev_mm[ch.channel_id] = ch.state['feed_mm']
 
     def _runout_handler(self, eventtime, ch):
