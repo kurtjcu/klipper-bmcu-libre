@@ -112,6 +112,9 @@ class BmcuChannel:
         self._stall_counter = 0
         self._startup_polls_remaining = 0
         self._direction_just_changed = False
+        self._feed_mm_at_reset = 0.0
+        self._lifetime_stall_count = 0
+        self._feed_mm_initialized = False
         self.sensor_enabled = True
         self.min_event_systime = 0.
         self.runout_gcode = gcode_macro.load_template(config, 'runout_gcode', '')
@@ -229,6 +232,9 @@ class BmcuFeeder:
         self.gcode.register_command(
             'BMCU_DIR', self._cmd_dir,
             desc="Set BMCU motor direction: BMCU_DIR CHANNEL=0 DIR=FWD")
+        self.gcode.register_command(
+            'BMCU_RESET_FEED', self._cmd_reset_feed,
+            desc="Reset BMCU feed distance counter: BMCU_RESET_FEED [CHANNEL=0]")
 
     def _register_sensor_commands(self):
         """Register per-channel SET_BMCU_SENSOR mux commands.
@@ -272,6 +278,22 @@ class BmcuFeeder:
             gcmd.respond_info("BMCU: channel %d not configured" % ch_id)
             return
         self._serial.send("DIR %d %s\n" % (ch_id, direction))
+
+    def _cmd_reset_feed(self, gcmd):
+        ch_id = gcmd.get_int('CHANNEL', default=None, minval=0, maxval=3)
+        if ch_id is not None:
+            if ch_id not in self._channels:
+                gcmd.respond_info("BMCU: channel %d not configured" % ch_id)
+                return
+            ch = self._channels[ch_id]
+            ch._feed_mm_at_reset = ch.state.get('feed_mm', 0.0)
+            ch._lifetime_stall_count = 0
+            gcmd.respond_info("BMCU channel %d feed counter reset" % ch_id)
+        else:
+            for cid, ch in self._channels.items():
+                ch._feed_mm_at_reset = ch.state.get('feed_mm', 0.0)
+                ch._lifetime_stall_count = 0
+            gcmd.respond_info("BMCU all channels feed counter reset")
 
     def _cmd_status(self, gcmd):
         lines = ["BMCU Status:"]
@@ -317,6 +339,9 @@ class BmcuFeeder:
                 'feed_mm':          float(m.group(6)),
                 'mag_status':       m.group(7),
             })
+            if not ch._feed_mm_initialized:
+                ch._feed_mm_at_reset = ch.state['feed_mm']
+                ch._feed_mm_initialized = True
             self._check_events(ch, old_state)
 
     def _check_events(self, ch, old_state):
@@ -374,9 +399,10 @@ class BmcuFeeder:
                         and now >= ch.min_event_systime
                         and ch.sensor_enabled):
                     ch._stall_counter = 0
+                    ch._lifetime_stall_count += 1
                     ch.min_event_systime = self.reactor.NEVER
-                    logging.info("BMCU ch%d: blockage detected (delta_mm=%.2f)" %
-                                 (ch.channel_id, delta))
+                    logging.info("BMCU ch%d: blockage detected (delta_mm=%.2f, total_stalls=%d)" %
+                                 (ch.channel_id, delta, ch._lifetime_stall_count))
                     self.reactor.register_callback(
                         lambda et, c=ch: self._stall_handler(et, c))
         else:
@@ -424,6 +450,9 @@ class BmcuFeeder:
                     'direction': str(ch.state.get('direction', 'FWD')),
                     'mag_status': str(ch.state.get('mag_status', 'unknown')),
                     'sensor_enabled': bool(ch.sensor_enabled),
+                    'feed_mm_since_reset': float(
+                        ch.state.get('feed_mm', 0.0) - ch._feed_mm_at_reset),
+                    'stall_count': int(ch._lifetime_stall_count),
                 }
                 for ch_id, ch in self._channels.items()
             }

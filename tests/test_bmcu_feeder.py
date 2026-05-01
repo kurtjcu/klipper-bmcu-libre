@@ -1267,9 +1267,10 @@ class TestBmcuDiagnostics:
                                                  stall_debounce_count=1,
                                                  stall_startup_ignore_polls=0)
         ch = feeder._channels[0]
-        # Initialize with first poll
+        # Initialize with first poll (insert event fires, clears min_event_systime)
         self._dispatch(feeder, 0, 10.0)
         feeder.reactor.callbacks.clear()
+        ch.min_event_systime = 0.0  # reset event suppression from insert
         # Trigger stall: zero delta with debounce_count=1
         self._dispatch(feeder, 0, 10.0)
         assert ch._lifetime_stall_count == 1
@@ -1313,9 +1314,11 @@ class TestBmcuDiagnostics:
         feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,),
                                                  stall_debounce_count=1,
                                                  stall_startup_ignore_polls=0)
-        # First poll: baseline
+        ch = feeder._channels[0]
+        # First poll: baseline (insert event fires, sets min_event_systime=NEVER)
         self._dispatch(feeder, 0, 10.0)
         feeder.reactor.callbacks.clear()
+        ch.min_event_systime = 0.0  # reset event suppression from insert
         # Zero delta: stall fires (debounce_count=1)
         self._dispatch(feeder, 0, 10.0)
         assert len(feeder.reactor.callbacks) >= 1
