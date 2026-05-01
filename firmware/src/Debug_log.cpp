@@ -80,7 +80,9 @@ static void Debug_uart3_dma_init(uint32_t baudrate)
 void Debug_log_init(void)
 {
     if (g_dbg_inited) return;
+#ifndef UART_PROTOCOL_ENABLED
     Debug_uart3_dma_init(Debug_log_baudrate);
+#endif
     g_dbg_inited = 1;
 }
 

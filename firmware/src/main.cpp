@@ -172,8 +172,18 @@ void ams_datas_save_run()
 
 int main(void)
 {
+    /* FIRST: Feed IWDG immediately — hardware watchdog starts at reset */
+    IWDG->CTLR = 0xAAAA;
+
     SystemInit();
     SystemCoreClockUpdate();
+
+    /* Reconfigure IWDG to max timeout ASAP */
+    IWDG->CTLR = 0x5555;            /* Unlock prescaler/reload */
+    IWDG->PSCR = IWDG_Prescaler_256; /* 128kHz/256 = 500Hz */
+    IWDG->RLDR = 0xFFF;             /* Reload = 4095 → ~8.2s timeout */
+    IWDG->CTLR = 0xAAAA;            /* Reload with new values */
+
     time_hw_init();
 
     __enable_irq();
@@ -185,18 +195,30 @@ int main(void)
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
     GPIO_PinRemapConfig(GPIO_Remap_PD01, ENABLE);
 
+    IWDG->CTLR = 0xAAAA;
     RGB_init();
     delay(10);
 
     SYS_RGB.set_RGB(0x10, 0x00, 0x00, 0);
     for (int i = 0; i < 4; i++) RGBOUT[i].set_RGB(0, 0, 0, 0);
+    IWDG->CTLR = 0xAAAA;
     RGB_update();
+#ifndef UART_PROTOCOL_ENABLED
     delay(50);
+#endif
 
     DEBUG_init();
     ams_init();
     Flash_saves_init();
+    IWDG->CTLR = 0xAAAA;
 
+#ifdef UART_PROTOCOL_ENABLED
+    /* In UART/Klipper mode, skip hardware-dependent inits that need motor power.
+       These will be revisited once Klipper controls power sequencing:
+       ADC_DMA_init, ADC_DMA_wait_full, MC_PULL_calibration_boot,
+       ams_datas_read, Flash_AMS_state_read, Motion_control_init */
+    uart_protocol_init();
+#else
     ADC_DMA_init();
     ADC_DMA_wait_full();
 
@@ -226,8 +248,6 @@ int main(void)
     }
 
     Motion_control_init();
-#ifdef UART_PROTOCOL_ENABLED
-    uart_protocol_init();
 #endif
 #ifndef DISABLE_BAMBUBUS
     bambubus_init();
@@ -273,9 +293,11 @@ int main(void)
         }
 #endif
 
+#ifndef UART_PROTOCOL_ENABLED
         Motion_control_run(error);
         RGB_update();
-#ifdef UART_PROTOCOL_ENABLED
+#else
+        IWDG->CTLR = 0xAAAA;
         uart_protocol_tick();
 #endif
     }
