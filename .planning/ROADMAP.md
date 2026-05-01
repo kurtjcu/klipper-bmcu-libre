@@ -36,7 +36,7 @@
   4. Reversing motor direction (BMCU_DIR) resets the stall comparison snapshot so the direction change itself does not trigger a stall
 **Plans:** 1 plan
 Plans:
-- [ ] 04-01-PLAN.md — Debounced stall detection with startup grace window and direction-change reset
+- [x] 04-01-PLAN.md — Debounced stall detection with startup grace window and direction-change reset
 
 ### Phase 5: Feed Diagnostics
 **Goal**: Users can monitor per-channel feed distance and cumulative stall count from Mainsail/Fluidd and reset the feed counter between jobs
