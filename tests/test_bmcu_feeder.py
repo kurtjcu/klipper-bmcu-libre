@@ -920,19 +920,19 @@ class TestBmcuStallDetection:
         feeder._check_events(ch, {'filament_present': True, 'motor_running': True,
                                    'feed_mm': 10.0, 'direction': 'FWD'})
 
-        # Motor starts again
+        # Motor starts again — this call sets grace=2, then enters stall block
+        # which decrements grace to 1 (consuming one grace poll)
         ch.state['motor_running'] = True
         old_restart = dict(ch.state)
         old_restart['motor_running'] = False
         feeder._check_events(ch, old_restart)
         reactor.callbacks.clear()
 
-        # 2 grace polls — should NOT fire (grace resets to 2)
-        feeder._check_events(ch, dict(ch.state))
+        # 1 more grace poll — grace decrements to 0
         feeder._check_events(ch, dict(ch.state))
         assert len(reactor.callbacks) == 0, "grace window must reset on motor restart"
 
-        # 3rd poll — grace expired, fires
+        # Next poll — grace expired, debounce_count=1, fires
         feeder._check_events(ch, dict(ch.state))
         assert len(reactor.callbacks) == 1, "stall must fire after reset grace window expires"
 
