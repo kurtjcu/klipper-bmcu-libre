@@ -21,7 +21,7 @@
 **Milestone Goal:** Harden stall detection to eliminate false positives, expose feed and stall diagnostics via Moonraker, and deliver macro-delegation compatibility for Happy Hare / AFC and Spoolman documentation.
 
 - [x] **Phase 4: Stall Detection Hardening** — Configurable thresholds and false-positive fixes (completed 2026-05-01)
-- [ ] **Phase 5: Feed Diagnostics** — Per-channel feed distance and stall count via Moonraker
+- [x] **Phase 5: Feed Diagnostics** — Per-channel feed distance and stall count via Moonraker (completed 2026-05-01)
 
 ## Phase Details
 
@@ -48,7 +48,7 @@ Plans:
   3. `stall_count` for each channel is visible in the Moonraker objects panel and increments only when the debounced stall logic fires
 **Plans:** 1 plan
 Plans:
-- [ ] 05-01-PLAN.md — Feed diagnostics: counters, BMCU_RESET_FEED command, get_status exposure
+- [x] 05-01-PLAN.md — Feed diagnostics: counters, BMCU_RESET_FEED command, get_status exposure
 
 ## Progress
 
@@ -61,4 +61,4 @@ Phases execute in numeric order: 4 → 5
 | 2. Klipper Extra | v1.0 | 4/4 | Complete | 2026-05-01 |
 | 3. Buffer Mode and Docs | v1.0 | 2/2 | Complete | 2026-05-01 |
 | 4. Stall Detection Hardening | v1.1 | 1/1 | Complete | 2026-05-01 |
-| 5. Feed Diagnostics | v1.1 | 0/1 | Not started | - |
+| 5. Feed Diagnostics | v1.1 | 1/1 | Complete | 2026-05-01 |

@@ -16,9 +16,9 @@ Requirements for v1.1 Refinement & Compatibility. Each maps to roadmap phases.
 
 ### Feed Diagnostics
 
-- [ ] **DIAG-01**: User can reset per-channel feed distance counter via BMCU_RESET_FEED GCode command
-- [ ] **DIAG-02**: Per-channel feed_mm_since_reset is exposed via Moonraker get_status()
-- [ ] **DIAG-03**: Per-channel cumulative stall_count is exposed via Moonraker get_status()
+- [x] **DIAG-01**: User can reset per-channel feed distance counter via BMCU_RESET_FEED GCode command
+- [x] **DIAG-02**: Per-channel feed_mm_since_reset is exposed via Moonraker get_status()
+- [x] **DIAG-03**: Per-channel cumulative stall_count is exposed via Moonraker get_status()
 
 ## Future Requirements
 
@@ -53,9 +53,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STALL-02 | Phase 4 | Complete |
 | STALL-03 | Phase 4 | Complete |
 | STALL-04 | Phase 4 | Complete |
-| DIAG-01 | Phase 5 | Pending |
-| DIAG-02 | Phase 5 | Pending |
-| DIAG-03 | Phase 5 | Pending |
+| DIAG-01 | Phase 5 | Complete |
+| DIAG-02 | Phase 5 | Complete |
+| DIAG-03 | Phase 5 | Complete |
 
 **Coverage:**
 - v1.1 requirements: 7 total
@@ -64,4 +64,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-05-01*
-*Last updated: 2026-05-01 after roadmap creation*
+*Last updated: 2026-05-01 after Phase 5 completion*

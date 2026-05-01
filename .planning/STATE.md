@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Refinement & Compatibility
 status: executing
-stopped_at: Roadmap created, ready to plan Phase 4
-last_updated: "2026-05-01T03:12:53.823Z"
-last_activity: 2026-05-01 -- Phase 5 planning complete
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-05-01T03:32:26Z"
+last_activity: 2026-05-01 -- Phase 5 Plan 01 completed
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 2
-  completed_plans: 1
-  percent: 50
+  completed_plans: 2
+  percent: 100
 ---
 
 # Project State
@@ -21,37 +21,38 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Any BMCU 370C owner can plug it into their Klipper printer with a USB-C cable and get per-channel filament runout/blockage detection and feeder control — no BambuBus, no RS485 adapter, no ESP32 bridge.
-**Current focus:** v1.1 Refinement & Compatibility — Phase 5: Feed Diagnostics
+**Current focus:** Phase 5 — Feed Diagnostics
 
 ## Current Position
 
-Phase: 5 — Feed Diagnostics
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-05-01 -- Phase 4 verified and complete
+Phase: 5 (Feed Diagnostics) — COMPLETE
+Plan: 1 of 1 (DONE)
+Status: Phase 5 complete
+Last activity: 2026-05-01 -- Phase 5 Plan 01 completed
 
 ```
-v1.1 Progress: [█████░░░░░] 50% (1/2 phases)
+v1.1 Progress: [██████████] 100% (2/2 phases)
 ```
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 1 (v1.1)
+- Total plans completed: 2 (v1.1)
 - Average duration: 3min
-- Total execution time: 3min
+- Total execution time: 6min
 
 **By Phase (v1.1):**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 04-stall-detection-hardening | 1/1 | 3min | 3min |
+| 05-feed-diagnostics | 1/1 | 3min | 3min |
 
 **Recent Trend:**
 
-- Last 5 plans: 04-01 (3min)
-- Trend: baseline
+- Last 5 plans: 04-01 (3min), 05-01 (3min)
+- Trend: consistent
 
 *Updated after each plan completion*
 
@@ -67,7 +68,10 @@ Recent decisions affecting current work:
 - [v1.1 Phase 04-01]: Debounce default 3 polls (1.5s) balances false-positive prevention with detection latency
 - [v1.1 Phase 04-01]: Startup grace default 2 polls (1.0s) for motor acceleration; tunable per-user
 - [v1.1 Phase 04-01]: Direction-change uses _direction_just_changed flag to skip one poll without losing _prev_mm snapshot
-- [v1.1 Phase 04-01]: get_status() stall_count exposure deferred to Phase 5 DIAG-03
+- [v1.1 Phase 04-01]: get_status() stall_count exposure deferred to Phase 5 DIAG-03 -- RESOLVED in 05-01
+- [v1.1 Phase 05-01]: feed_mm_since_reset is signed (not absolute) -- matches firmware encoder semantics
+- [v1.1 Phase 05-01]: BMCU_RESET_FEED resets both feed distance and stall count -- single command for START_PRINT macro
+- [v1.1 Phase 05-01]: First-poll initialization sets _feed_mm_at_reset to firmware value so feed_mm_since_reset starts at 0.0
 - [v1.0 Phase 02-klipper-extra]: reactor.register_fd with timeout=0 for serial I/O — no background threads (Klipper issue #2187)
 - [v1.0 Phase 02-klipper-extra]: Motor RUN/STOP use Motion_control_set_PWM directly, not ams_state_set_loaded
 
@@ -88,6 +92,6 @@ None currently active.
 ## Session Continuity
 
 Last session: 2026-05-01
-Stopped at: Completed 04-01-PLAN.md
+Stopped at: Completed 05-01-PLAN.md
 Resume file: None
-Next action: Execute Phase 5 plans
+Next action: Phases 4 and 5 complete -- v1.1 milestone progress at 100% for stall hardening and feed diagnostics
