@@ -247,7 +247,10 @@ class MockGcmd:
         self._responses = []
 
     def get_int(self, key, default=None, minval=None, maxval=None):
-        return int(self._params.get(key, default))
+        val = self._params.get(key, default)
+        if val is None:
+            return None
+        return int(val)
 
     def get(self, key, default=None):
         return self._params.get(key, default)

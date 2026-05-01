@@ -1171,3 +1171,170 @@ class TestBmcuSerialPathValidation:
         # Should not raise — by-id is also acceptable
         feeder = BmcuFeeder(cfg)
         assert feeder.serial_port.startswith('/dev/serial/by-id/')
+
+
+# ===========================================================================
+# Phase 5 Plan 01: Feed diagnostics tests (DIAG-01, DIAG-02, DIAG-03)
+# ===========================================================================
+
+class TestBmcuDiagnostics:
+    """Tests for Phase 5 feed diagnostics: DIAG-01, DIAG-02, DIAG-03."""
+
+    def _make_feeder_with_channel(self, monkeypatch, ch_ids=(0,),
+                                   stall_threshold_mm=0.5,
+                                   stall_debounce_count=1,
+                                   stall_startup_ignore_polls=0):
+        """Helper: build a connected BmcuFeeder with diagnostics-ready channels."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        for ch_id in ch_ids:
+            ch_params = {
+                'extruder': 'extruder',
+                'runout_gcode': 'PAUSE',
+                'insert_gcode': 'RESUME',
+                'stall_gcode': 'M600',
+                'stall_threshold_mm': stall_threshold_mm,
+                'stall_debounce_count': stall_debounce_count,
+                'stall_startup_ignore_polls': stall_startup_ignore_polls,
+            }
+            ch_cfg = MockConfig(ch_params, name='bmcu_channel %d' % ch_id)
+            ch_cfg.printer = cfg.printer
+            cfg.printer.add_object('bmcu_channel %d' % ch_id, BmcuChannel(ch_cfg))
+        cfg.printer._objects['idle_timeout'] = MockIdleTimeout(state='Printing')
+        cfg.printer._objects['pause_resume'] = MockPauseResume()
+
+        monkeypatch.setattr(
+            'klippy.extras.bmcu_feeder.serial.Serial',
+            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+        )
+        feeder._handle_connect()
+        return feeder
+
+    def _dispatch(self, feeder, ch_id, feed_mm, fil=1, mot=1, spd=50,
+                  direction='FWD', mag='ok'):
+        """Helper: inject a STATUS line and poll to update channel state."""
+        feeder._serial._lines = [
+            ('LINE', 'STATUS ok ch=%d fil=%d mot=%d spd=%d dir=%s mm=%.1f mag=%s'
+             % (ch_id, fil, mot, spd, direction, feed_mm, mag))
+        ]
+        feeder._poll_status(0.0)
+
+    def test_reset_feed_single_channel(self, monkeypatch):
+        """BMCU_RESET_FEED CHANNEL=0 resets only channel 0; channel 1 keeps its first-poll init."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0, 1))
+        # Initialize both channels via first poll
+        self._dispatch(feeder, 0, 100.0)
+        self._dispatch(feeder, 1, 200.0)
+        # Reset only channel 0
+        feeder._cmd_reset_feed(MockGcmd({'CHANNEL': 0}))
+        # Advance both channels
+        self._dispatch(feeder, 0, 150.0)
+        self._dispatch(feeder, 1, 250.0)
+        status = feeder.get_status(0.0)
+        assert status['channels']['0']['feed_mm_since_reset'] == pytest.approx(50.0)
+        assert status['channels']['1']['feed_mm_since_reset'] == pytest.approx(50.0)
+
+    def test_reset_feed_all_channels(self, monkeypatch):
+        """BMCU_RESET_FEED without CHANNEL resets all channels."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0, 1))
+        self._dispatch(feeder, 0, 100.0)
+        self._dispatch(feeder, 1, 200.0)
+        # Advance
+        self._dispatch(feeder, 0, 150.0)
+        self._dispatch(feeder, 1, 250.0)
+        # Reset all
+        feeder._cmd_reset_feed(MockGcmd({}))
+        # Advance again
+        self._dispatch(feeder, 0, 170.0)
+        self._dispatch(feeder, 1, 280.0)
+        status = feeder.get_status(0.0)
+        assert status['channels']['0']['feed_mm_since_reset'] == pytest.approx(20.0)
+        assert status['channels']['1']['feed_mm_since_reset'] == pytest.approx(30.0)
+
+    def test_reset_feed_invalid_channel(self, monkeypatch):
+        """BMCU_RESET_FEED CHANNEL=9 responds with 'not configured', no crash."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,))
+        gcmd = MockGcmd({'CHANNEL': 9})
+        feeder._cmd_reset_feed(gcmd)
+        assert any("not configured" in r for r in gcmd._responses)
+
+    def test_reset_feed_resets_stall_count(self, monkeypatch):
+        """BMCU_RESET_FEED zeros _lifetime_stall_count."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,),
+                                                 stall_debounce_count=1,
+                                                 stall_startup_ignore_polls=0)
+        ch = feeder._channels[0]
+        # Initialize with first poll
+        self._dispatch(feeder, 0, 10.0)
+        feeder.reactor.callbacks.clear()
+        # Trigger stall: zero delta with debounce_count=1
+        self._dispatch(feeder, 0, 10.0)
+        assert ch._lifetime_stall_count == 1
+        # Reset
+        feeder._cmd_reset_feed(MockGcmd({'CHANNEL': 0}))
+        assert ch._lifetime_stall_count == 0
+        assert feeder.get_status(0.0)['channels']['0']['stall_count'] == 0
+
+    def test_feed_mm_since_reset_in_get_status(self, monkeypatch):
+        """get_status shows feed_mm_since_reset as delta from first-poll init."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,))
+        self._dispatch(feeder, 0, 100.0)  # first poll inits _feed_mm_at_reset=100
+        self._dispatch(feeder, 0, 150.0)
+        status = feeder.get_status(0.0)
+        assert status['channels']['0']['feed_mm_since_reset'] == pytest.approx(50.0)
+
+    def test_feed_mm_since_reset_updates_after_poll(self, monkeypatch):
+        """feed_mm_since_reset updates with each poll."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,))
+        self._dispatch(feeder, 0, 100.0)  # init
+        self._dispatch(feeder, 0, 200.0)
+        assert feeder.get_status(0.0)['channels']['0']['feed_mm_since_reset'] == pytest.approx(100.0)
+        self._dispatch(feeder, 0, 300.0)
+        assert feeder.get_status(0.0)['channels']['0']['feed_mm_since_reset'] == pytest.approx(200.0)
+
+    def test_feed_mm_since_reset_negative_on_reverse(self, monkeypatch):
+        """feed_mm_since_reset is signed (negative when reversed)."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,))
+        self._dispatch(feeder, 0, 100.0)  # init
+        feeder._cmd_reset_feed(MockGcmd({'CHANNEL': 0}))
+        self._dispatch(feeder, 0, 80.0)
+        assert feeder.get_status(0.0)['channels']['0']['feed_mm_since_reset'] == pytest.approx(-20.0)
+
+    def test_stall_count_starts_at_zero(self, monkeypatch):
+        """stall_count starts at 0 in get_status."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,))
+        assert feeder.get_status(0.0)['channels']['0']['stall_count'] == 0
+
+    def test_stall_count_increments_on_stall_fire(self, monkeypatch):
+        """stall_count increments when debounced stall fires."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,),
+                                                 stall_debounce_count=1,
+                                                 stall_startup_ignore_polls=0)
+        # First poll: baseline
+        self._dispatch(feeder, 0, 10.0)
+        feeder.reactor.callbacks.clear()
+        # Zero delta: stall fires (debounce_count=1)
+        self._dispatch(feeder, 0, 10.0)
+        assert len(feeder.reactor.callbacks) >= 1
+        assert feeder.get_status(0.0)['channels']['0']['stall_count'] == 1
+
+    def test_stall_count_no_increment_on_motor_stop(self, monkeypatch):
+        """Motor stop does not increment stall_count."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,))
+        self._dispatch(feeder, 0, 10.0, mot=0)
+        assert feeder.get_status(0.0)['channels']['0']['stall_count'] == 0
+
+    def test_feed_mm_initialized_from_first_poll(self, monkeypatch):
+        """First STATUS poll sets _feed_mm_at_reset to firmware value; feed_mm_since_reset starts at 0."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,))
+        self._dispatch(feeder, 0, 1500.0)  # firmware accumulated value
+        assert feeder.get_status(0.0)['channels']['0']['feed_mm_since_reset'] == pytest.approx(0.0)
+
+    def test_mock_gcmd_get_int_none_default(self):
+        """MockGcmd.get_int with default=None and missing key returns None."""
+        gcmd = MockGcmd({})
+        result = gcmd.get_int('CHANNEL', default=None)
+        assert result is None
