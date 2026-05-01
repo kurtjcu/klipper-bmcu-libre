@@ -1,0 +1,3 @@
+[submodule "tools/bmcu-flasher"]
+	path = tools/bmcu-flasher
+	url = https://github.com/jarczakpawel/BMCU-Flasher.git

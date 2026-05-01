@@ -1,5 +1,5 @@
 /*
- * uart_protocol.c — 8N1 ASCII command/response protocol on USART2 (PA2/PA3)
+ * uart_protocol.c — 8N1 ASCII command/response protocol on USART1 (PA9/PA10 → CH340 USB-C)
  *
  * Decision: Motor RUN/STOP use Motion_control_set_PWM(ch, pwm) directly.
  * ams_state_set_loaded/unloaded are simple state-save helpers (persist to flash
@@ -14,6 +14,7 @@
 #include "ch32v20x_usart.h"
 #include "ch32v20x_gpio.h"
 #include "ch32v20x_rcc.h"
+#include "ch32v20x_iwdg.h"
 #include "Motion_control.h"
 #include "many_soft_AS5600.h"
 #include <string.h>
@@ -53,8 +54,8 @@ static uint8_t rx_pos = 0;
 /* ---------- low-level I/O ---------- */
 
 static void usart2_send_char(char c) {
-    while (!(USART2->STATR & USART_FLAG_TXE));
-    USART2->DATAR = (uint8_t)c;
+    while (!(USART1->STATR & USART_FLAG_TXE));
+    USART1->DATAR = (uint8_t)c;
 }
 
 static void usart2_send_string(const char *s) {
@@ -64,15 +65,15 @@ static void usart2_send_string(const char *s) {
 }
 
 static int usart2_rx_available(void) {
-    uint16_t sta = USART2->STATR;
+    uint16_t sta = USART1->STATR;
     if (sta & USART_FLAG_ORE) {
-        (void)USART2->DATAR;  /* clear ORE by reading DATAR */
+        (void)USART1->DATAR;  /* clear ORE by reading DATAR */
     }
     return (sta & USART_FLAG_RXNE) ? 1 : 0;
 }
 
 static uint8_t usart2_rx_byte(void) {
-    return (uint8_t)(USART2->DATAR & 0xFF);
+    return (uint8_t)(USART1->DATAR & 0xFF);
 }
 
 /* ---------- feed distance functions ---------- */
@@ -89,8 +90,9 @@ static void update_feed_distance(int ch) {
     prev_angle[ch] = now;
 }
 
-static float get_feed_mm(int ch) {
-    return (feed_counts[ch] / 4096.0f) * GEAR_CIRCUMFERENCE_MM;
+/* Returns feed distance as integer tenths of mm (e.g. 1425 = 142.5mm) */
+static int32_t get_feed_mm_x10(int ch) {
+    return (int32_t)((feed_counts[ch] * (int32_t)(GEAR_CIRCUMFERENCE_MM * 10.0f)) / 4096);
 }
 
 /* ---------- AS5600 magnet status helpers ---------- */
@@ -153,14 +155,18 @@ static void send_status_response(void) {
         /* direction string */
         const char *dir_s = (motor_dir[ch] >= 0) ? "FWD" : "REV";
 
+        int32_t mm10 = get_feed_mm_x10(ch);
+        int32_t mm_whole = mm10 / 10;
+        int32_t mm_frac  = (mm10 < 0 ? -mm10 : mm10) % 10;
+
         pos += snprintf(buf + pos, (int)sizeof(buf) - pos,
-            " ch=%d fil=%d mot=%d spd=%d dir=%s mm=%.1f mag=%s",
+            " ch=%d fil=%d mot=%d spd=%d dir=%s mm=%ld.%ld mag=%s",
             ch,
             filament_channel_inserted[ch] ? 1 : 0,
             motor_running[ch] ? 1 : 0,
             motor_speed[ch],
             dir_s,
-            get_feed_mm(ch),
+            (long)mm_whole, (long)mm_frac,
             mag
         );
     }
@@ -308,19 +314,25 @@ void uart_protocol_init(void) {
     GPIO_InitTypeDef  g = {0};
     USART_InitTypeDef u = {0};
 
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA,  ENABLE);
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1 | RCC_APB2Periph_GPIOA, ENABLE);
 
-    /* PA2 = USART2_TX (alt function push-pull) */
-    g.GPIO_Pin   = GPIO_Pin_2;
+    /* PA9 = USART1_TX (alt function push-pull) */
+    g.GPIO_Pin   = GPIO_Pin_9;
     g.GPIO_Speed = GPIO_Speed_50MHz;
     g.GPIO_Mode  = GPIO_Mode_AF_PP;
     GPIO_Init(GPIOA, &g);
 
-    /* PA3 = USART2_RX (input pull-up) */
-    g.GPIO_Pin  = GPIO_Pin_3;
+    /* PA10 = USART1_RX (input pull-up) */
+    g.GPIO_Pin  = GPIO_Pin_10;
     g.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init(GPIOA, &g);
+
+    /* PA12 = RS-485 DE — keep HIGH (TX mode) for now */
+    g.GPIO_Pin   = GPIO_Pin_12;
+    g.GPIO_Speed = GPIO_Speed_50MHz;
+    g.GPIO_Mode  = GPIO_Mode_Out_PP;
+    GPIO_Init(GPIOA, &g);
+    GPIOA->BSHR = GPIO_Pin_12;  /* DE HIGH = always transmit */
 
     /* 8N1 at UART_BAUD (default 115200) */
     u.USART_BaudRate            = UART_BAUD;
@@ -329,20 +341,16 @@ void uart_protocol_init(void) {
     u.USART_Parity              = USART_Parity_No;
     u.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
     u.USART_Mode                = USART_Mode_Tx | USART_Mode_Rx;
-    USART_Init(USART2, &u);
-    USART_Cmd(USART2, ENABLE);
+    USART_Init(USART1, &u);
+    USART_Cmd(USART1, ENABLE);
 
     rx_pos = 0;
 
-    /* Report AS5600 magnet health on boot */
     send_boot_message();
 }
 
 void uart_protocol_tick(void) {
-    /* Update feed distance accumulators before processing RX */
-    for (int ch = 0; ch < 4; ch++) {
-        update_feed_distance(ch);
-    }
+    IWDG->CTLR = 0xAAAA; /* Feed watchdog */
 
     while (usart2_rx_available()) {
         char c = (char)usart2_rx_byte();
