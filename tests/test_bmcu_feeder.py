@@ -681,7 +681,9 @@ class TestBmcuEventDispatch:
 class TestBmcuStallDetection:
     """Tests for blockage detection: feed_mm stall while motor running and filament present."""
 
-    def _make_feeder_with_channel(self, monkeypatch, stall_threshold_mm=0.5):
+    def _make_feeder_with_channel(self, monkeypatch, stall_threshold_mm=0.5,
+                                   stall_debounce_count=1,
+                                   stall_startup_ignore_polls=0):
         """Helper: build a connected BmcuFeeder with one stall-configured channel."""
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
@@ -694,6 +696,8 @@ class TestBmcuStallDetection:
             'insert_gcode': 'RESUME',
             'stall_gcode': 'M600',
             'stall_threshold_mm': stall_threshold_mm,
+            'stall_debounce_count': stall_debounce_count,
+            'stall_startup_ignore_polls': stall_startup_ignore_polls,
         }
         ch_cfg = MockConfig(ch_params, name='bmcu_channel 0')
         ch_cfg.printer = cfg.printer
@@ -791,6 +795,206 @@ class TestBmcuStallDetection:
         feeder._check_events(ch, dict(ch.state))
 
         assert len(reactor.callbacks) == 1, "stall must detect delta < stall_threshold_mm=0.1"
+
+    # --- Phase 4: Stall hardening tests (STALL-01 through STALL-04) ---
+
+    def test_stall_no_fire_single_poll_with_debounce(self, monkeypatch):
+        """With stall_debounce_count=3, two consecutive zero-delta polls do NOT fire stall."""
+        feeder = self._make_feeder_with_channel(monkeypatch,
+                                                 stall_debounce_count=3,
+                                                 stall_startup_ignore_polls=0)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
+
+        # Call 1 — establishes baseline in _prev_mm
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+
+        # Call 2 — first sub-threshold (same feed_mm)
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 0, "1 sub-threshold poll must not fire with debounce=3"
+
+        # Call 3 — second sub-threshold
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 0, "2 sub-threshold polls must not fire with debounce=3"
+
+    def test_stall_fires_after_n_consecutive_polls(self, monkeypatch):
+        """With stall_debounce_count=3, 3 consecutive zero-delta polls fire exactly one stall."""
+        feeder = self._make_feeder_with_channel(monkeypatch,
+                                                 stall_debounce_count=3,
+                                                 stall_startup_ignore_polls=0)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
+
+        # Baseline call
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+
+        # 3 consecutive zero-delta polls
+        feeder._check_events(ch, dict(ch.state))
+        feeder._check_events(ch, dict(ch.state))
+        feeder._check_events(ch, dict(ch.state))
+
+        assert len(reactor.callbacks) == 1, "stall must fire after 3 consecutive sub-threshold polls"
+
+    def test_stall_counter_resets_on_motion(self, monkeypatch):
+        """With stall_debounce_count=3, motion resets counter so stall does not fire."""
+        feeder = self._make_feeder_with_channel(monkeypatch,
+                                                 stall_debounce_count=3,
+                                                 stall_startup_ignore_polls=0)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
+
+        # Baseline
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+
+        # 2 zero-delta polls (counter at 2)
+        feeder._check_events(ch, dict(ch.state))
+        feeder._check_events(ch, dict(ch.state))
+
+        # Motion detected (feed_mm increases past threshold)
+        ch.state['feed_mm'] = 12.0
+        feeder._check_events(ch, dict(ch.state))
+
+        # 2 more zero-delta polls (counter should be at 2, not 3+)
+        feeder._check_events(ch, dict(ch.state))
+        feeder._check_events(ch, dict(ch.state))
+
+        assert len(reactor.callbacks) == 0, "motion must reset stall counter"
+
+    def test_startup_grace_window_suppresses_stall(self, monkeypatch):
+        """With stall_startup_ignore_polls=2 and debounce=1, first 2 polls after motor start suppressed."""
+        feeder = self._make_feeder_with_channel(monkeypatch,
+                                                 stall_debounce_count=1,
+                                                 stall_startup_ignore_polls=2)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
+
+        # Motor start transition (old motor_running=False -> new=True)
+        old_state = dict(ch.state)
+        old_state['motor_running'] = False
+        feeder._check_events(ch, old_state)
+        reactor.callbacks.clear()
+
+        # Grace poll 1 — should NOT fire
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 0, "grace poll 1 must suppress stall"
+
+        # Grace poll 2 — should NOT fire
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 0, "grace poll 2 must suppress stall"
+
+        # Grace expired, debounce_count=1 — should fire
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 1, "stall must fire after grace window expires"
+
+    def test_startup_grace_resets_on_motor_restart(self, monkeypatch):
+        """When motor stops and restarts, grace window resets to full count."""
+        feeder = self._make_feeder_with_channel(monkeypatch,
+                                                 stall_debounce_count=1,
+                                                 stall_startup_ignore_polls=2)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
+
+        # Motor start
+        old_start = dict(ch.state)
+        old_start['motor_running'] = False
+        feeder._check_events(ch, old_start)
+
+        # 1 grace poll
+        feeder._check_events(ch, dict(ch.state))
+
+        # Motor stops
+        ch.state['motor_running'] = False
+        feeder._check_events(ch, {'filament_present': True, 'motor_running': True,
+                                   'feed_mm': 10.0, 'direction': 'FWD'})
+
+        # Motor starts again
+        ch.state['motor_running'] = True
+        old_restart = dict(ch.state)
+        old_restart['motor_running'] = False
+        feeder._check_events(ch, old_restart)
+        reactor.callbacks.clear()
+
+        # 2 grace polls — should NOT fire (grace resets to 2)
+        feeder._check_events(ch, dict(ch.state))
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 0, "grace window must reset on motor restart"
+
+        # 3rd poll — grace expired, fires
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 1, "stall must fire after reset grace window expires"
+
+    def test_direction_change_resets_prev_mm(self, monkeypatch):
+        """Direction change sets _direction_just_changed flag; stall skips that poll."""
+        feeder = self._make_feeder_with_channel(monkeypatch,
+                                                 stall_debounce_count=1,
+                                                 stall_startup_ignore_polls=0)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': True,
+                         'feed_mm': 10.0, 'direction': 'FWD'})
+
+        # Baseline
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+
+        # Direction change: FWD -> REV
+        old_state = dict(ch.state)
+        ch.state['direction'] = 'REV'
+        feeder._check_events(ch, old_state)
+        assert len(reactor.callbacks) == 0, \
+            "direction change poll must NOT fire stall (flag suppresses counter)"
+
+        # Next poll — no direction change, same feed_mm, counter increments to 1
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 1, \
+            "first real post-direction-change sub-threshold poll must fire stall"
+
+    def test_stall_counter_resets_when_motor_stops(self, monkeypatch):
+        """Stall counter does not carry across motor stop/start cycles."""
+        feeder = self._make_feeder_with_channel(monkeypatch,
+                                                 stall_debounce_count=3,
+                                                 stall_startup_ignore_polls=0)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
+
+        # Baseline
+        feeder._check_events(ch, dict(ch.state))
+        reactor.callbacks.clear()
+
+        # 2 zero-delta polls (counter at 2)
+        feeder._check_events(ch, dict(ch.state))
+        feeder._check_events(ch, dict(ch.state))
+
+        # Motor stops — counter must reset
+        old_running = dict(ch.state)
+        ch.state['motor_running'] = False
+        feeder._check_events(ch, old_running)
+
+        # Motor starts again
+        old_stopped = dict(ch.state)
+        ch.state['motor_running'] = True
+        feeder._check_events(ch, old_stopped)
+
+        # 1 zero-delta poll — counter should be 1, not 3
+        feeder._check_events(ch, dict(ch.state))
+        assert len(reactor.callbacks) == 0, \
+            "stall counter must not carry across motor stop/start"
 
 
 # ===========================================================================
