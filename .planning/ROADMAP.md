@@ -20,7 +20,7 @@
 
 **Milestone Goal:** Harden stall detection to eliminate false positives, expose feed and stall diagnostics via Moonraker, and deliver macro-delegation compatibility for Happy Hare / AFC and Spoolman documentation.
 
-- [ ] **Phase 4: Stall Detection Hardening** — Configurable thresholds and false-positive fixes
+- [x] **Phase 4: Stall Detection Hardening** — Configurable thresholds and false-positive fixes (completed 2026-05-01)
 - [ ] **Phase 5: Feed Diagnostics** — Per-channel feed distance and stall count via Moonraker
 
 ## Phase Details
@@ -60,5 +60,5 @@ Phases execute in numeric order: 4 → 5
 | 1. Firmware | v1.0 | 3/3 | Complete | 2026-04-30 |
 | 2. Klipper Extra | v1.0 | 4/4 | Complete | 2026-05-01 |
 | 3. Buffer Mode and Docs | v1.0 | 2/2 | Complete | 2026-05-01 |
-| 4. Stall Detection Hardening | v1.1 | 0/1 | Not started | - |
+| 4. Stall Detection Hardening | v1.1 | 1/1 | Complete | 2026-05-01 |
 | 5. Feed Diagnostics | v1.1 | 0/1 | Not started | - |

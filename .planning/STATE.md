@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Any BMCU 370C owner can plug it into their Klipper printer with a USB-C cable and get per-channel filament runout/blockage detection and feeder control — no BambuBus, no RS485 adapter, no ESP32 bridge.
-**Current focus:** v1.1 Refinement & Compatibility — Phase 4: Stall Detection Hardening
+**Current focus:** v1.1 Refinement & Compatibility — Phase 5: Feed Diagnostics
 
 ## Current Position
 
-Phase: 4 — Stall Detection Hardening
-Plan: 1/1 complete
-Status: Phase 4 complete, ready for Phase 5
-Last activity: 2026-05-01 -- Phase 4 Plan 01 executed
+Phase: 5 — Feed Diagnostics
+Plan: Not started
+Status: Ready to execute
+Last activity: 2026-05-01 -- Phase 4 verified and complete
 
 ```
 v1.1 Progress: [█████░░░░░] 50% (1/2 phases)
