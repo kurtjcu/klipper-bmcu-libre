@@ -21,6 +21,7 @@
 #include "Motion_control.h"
 #include "many_soft_AS5600.h"
 #include "ADC_DMA.h"
+#include "hal/time_hw.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,25 +45,15 @@ static bool hw_enabled = false;
 
 /* ---------- LED status helpers ---------- */
 
-static void led_set_enabled(int ch) {
-    /* Red = enabled but stopped */
-    RGBOUT[ch].set_RGB(255, 0, 0, 0);
-    RGBOUT[ch].set_RGB(255, 0, 0, 1);
+static void led_set_ch(int ch, uint8_t r, uint8_t g, uint8_t b) {
+    RGBOUT[ch].set_RGB(r, g, b, 0);
+    RGBOUT[ch].set_RGB(r, g, b, 1);
     RGBOUT[ch].updata();
 }
 
-static void led_set_running(int ch) {
-    /* Green = motor running */
-    RGBOUT[ch].set_RGB(0, 255, 0, 0);
-    RGBOUT[ch].set_RGB(0, 255, 0, 1);
-    RGBOUT[ch].updata();
-}
-
-static void led_set_off(int ch) {
-    RGBOUT[ch].set_RGB(0, 0, 0, 0);
-    RGBOUT[ch].set_RGB(0, 0, 0, 1);
-    RGBOUT[ch].updata();
-}
+/* LED state tracking for flash/blink effects */
+static uint32_t led_last_update = 0;
+static bool     led_flash_on[4] = {false, false, false, false};
 
 /* ---------- module-level motor state ---------- */
 
@@ -455,9 +446,10 @@ static void cmd_enable(const char *args) {
 
     hw_enabled = true;
 
-    /* Set all channel LEDs to red (enabled but stopped) */
+    /* Set channel LEDs based on filament state: green=loaded, red=empty */
     for (int ch = 0; ch < 4; ch++)
-        led_set_enabled(ch);
+        led_set_ch(ch, MC_ONLINE_key_stu[ch] ? 0 : 255,
+                       MC_ONLINE_key_stu[ch] ? 255 : 0, 0);
 
     /* Report sensor status */
     char buf[128];
@@ -581,16 +573,46 @@ static bool motor_is_active(int ch) {
 void uart_protocol_tick(void) {
     IWDG->CTLR = 0xAAAA; /* Feed watchdog */
 
-    /* Update LEDs based on actual motor state */
-    if (hw_enabled) {
+    /* Update LEDs:
+     *   Not enabled: blink dim white once every 5 seconds
+     *   Enabled, motor feeding: flash white (100ms on/off)
+     *   Enabled, filament present: solid green
+     *   Enabled, filament absent: solid red
+     */
+    const uint32_t now = time_ticks32();
+
+    if (!hw_enabled) {
+        /* Blink dim white once every 5 seconds (100ms pulse) */
+        const uint32_t period = ms_to_ticks32(5000u);
+        const uint32_t pulse  = ms_to_ticks32(100u);
+        uint32_t elapsed = (uint32_t)(now - led_last_update);
+        if (elapsed >= period) {
+            led_last_update = now;
+            elapsed = 0;
+        }
+        bool on = (elapsed < pulse);
+        for (int ch = 0; ch < 4; ch++)
+            led_set_ch(ch, on ? 32 : 0, on ? 32 : 0, on ? 32 : 0);
+    } else {
         for (int ch = 0; ch < 4; ch++) {
             bool active = motor_is_active(ch);
-            if (active && !motor_running[ch]) {
-                motor_running[ch] = true;
-                led_set_running(ch);
-            } else if (!active && motor_running[ch]) {
-                motor_running[ch] = false;
-                led_set_enabled(ch);
+            motor_running[ch] = active;
+
+            if (active) {
+                /* Flash white while feeding (100ms toggle) */
+                const uint32_t toggle = ms_to_ticks32(100u);
+                uint32_t elapsed = (uint32_t)(now - led_last_update);
+                if (elapsed >= toggle) {
+                    led_last_update = now;
+                    led_flash_on[ch] = !led_flash_on[ch];
+                }
+                led_set_ch(ch, led_flash_on[ch] ? 255 : 0,
+                               led_flash_on[ch] ? 255 : 0,
+                               led_flash_on[ch] ? 255 : 0);
+            } else {
+                /* Green = filament present, Red = empty */
+                bool fil = (MC_ONLINE_key_stu[ch] != 0);
+                led_set_ch(ch, fil ? 0 : 255, fil ? 255 : 0, 0);
             }
         }
     }
