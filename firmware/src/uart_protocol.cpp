@@ -222,9 +222,10 @@ static void send_status_response(void) {
         int32_t mm_frac  = (mm10 < 0 ? -mm10 : mm10) % 10;
 
         pos += snprintf(buf + pos, (int)sizeof(buf) - pos,
-            " ch=%d fil=%d mot=%d spd=%d dir=%s mm=%ld.%ld mag=%s",
+            " ch=%d ins=%d fil=%d mot=%d spd=%d dir=%s mm=%ld.%ld mag=%s",
             ch,
             filament_channel_inserted[ch] ? 1 : 0,
+            (int)MC_ONLINE_key_stu[ch],
             motor_running[ch] ? 1 : 0,
             motor_speed[ch],
             dir_s,

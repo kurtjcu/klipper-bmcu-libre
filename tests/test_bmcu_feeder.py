@@ -465,7 +465,7 @@ class TestBmcuPolling:
 
         # Directly inject a line into the serial's line buffer (bypass fd reading)
         feeder._serial._lines = [
-            ('LINE', 'STATUS ok ch=0 fil=1 mot=1 spd=50 dir=FWD mm=142.5 mag=ok')
+            ('LINE', 'STATUS ok ch=0 ins=1 fil=1 mot=1 spd=50 dir=FWD mm=142.5 mag=ok')
         ]
 
         feeder._poll_status(0.0)
@@ -484,8 +484,8 @@ class TestBmcuPolling:
 
         feeder._serial._lines = [
             ('LINE',
-             'STATUS ok ch=0 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok '
-             'ch=1 fil=0 mot=1 spd=75 dir=REV mm=50.3 mag=ok')
+             'STATUS ok ch=0 ins=1 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok '
+             'ch=1 ins=1 fil=0 mot=1 spd=75 dir=REV mm=50.3 mag=ok')
         ]
 
         feeder._poll_status(0.0)
@@ -509,8 +509,8 @@ class TestBmcuPolling:
 
         feeder._serial._lines = [
             ('LINE',
-             'STATUS ok ch=0 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok '
-             'ch=3 fil=1 mot=1 spd=50 dir=FWD mm=10.0 mag=fault')
+             'STATUS ok ch=0 ins=1 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok '
+             'ch=3 ins=1 fil=1 mot=1 spd=50 dir=FWD mm=10.0 mag=fault')
         ]
 
         feeder._poll_status(0.0)

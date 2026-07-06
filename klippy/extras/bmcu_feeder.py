@@ -18,7 +18,7 @@ import re
 # ---------------------------------------------------------------------------
 
 _STATUS_FIELD_RE = re.compile(
-    r'ch=(\d) fil=(\d) mot=(\d) spd=(\d+) dir=(\w+) mm=(-?[\d.]+) mag=(\w+)')
+    r'ch=(\d) ins=(\d) fil=(\d) mot=(\d) spd=(\d+) dir=(\w+) mm=(-?[\d.]+) mag=(\w+)')
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +148,7 @@ class BmcuChannel:
         self.insert_gcode = gcode_macro.load_template(config, 'insert_gcode', '')
         self.stall_gcode = gcode_macro.load_template(config, 'stall_gcode', '')
         self.state = {
+            'channel_inserted': False,
             'filament_present': False,
             'motor_running': False,
             'speed': 0,
@@ -368,12 +369,13 @@ class BmcuFeeder:
             ch = self._channels[ch_id]
             old_state = dict(ch.state)
             ch.state.update({
-                'filament_present': m.group(2) == '1',
-                'motor_running':    m.group(3) == '1',
-                'speed':            int(m.group(4)),
-                'direction':        m.group(5),
-                'feed_mm':          float(m.group(6)),
-                'mag_status':       m.group(7),
+                'channel_inserted': m.group(2) == '1',
+                'filament_present': m.group(3) != '0',
+                'motor_running':    m.group(4) == '1',
+                'speed':            int(m.group(5)),
+                'direction':        m.group(6),
+                'feed_mm':          float(m.group(7)),
+                'mag_status':       m.group(8),
             })
             if not ch._feed_mm_initialized:
                 ch._feed_mm_at_reset = ch.state['feed_mm']
