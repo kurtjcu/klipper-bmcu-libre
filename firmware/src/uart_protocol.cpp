@@ -466,11 +466,35 @@ static void cmd_enable(const char *args) {
     usart2_send_string(buf);
 }
 
+/* ---------- DISABLE command ---------- */
+
+static void cmd_disable(const char *args) {
+    (void)args;
+    if (!hw_enabled) {
+        usart2_send_string("DISABLE ok already\n");
+        return;
+    }
+
+    /* Stop all motors */
+    for (int ch = 0; ch < 4; ch++) {
+        Motion_control_set_PWM((uint8_t)ch, 0);
+        motor_running[ch] = false;
+        motor_speed[ch] = 0;
+    }
+
+    hw_enabled = false;
+    led_last_update = time_ticks32();
+
+    usart2_send_string("DISABLE ok\n");
+}
+
 /* ---------- command dispatch ---------- */
 
 static void dispatch_command(const char *line) {
     if (strncmp(line, "ENABLE", 6) == 0) {
         cmd_enable(line + 6);
+    } else if (strncmp(line, "DISABLE", 7) == 0) {
+        cmd_disable(line + 7);
     } else if (strncmp(line, "STATUS", 6) == 0) {
         send_status_response();
     } else if (strncmp(line, "RUN ", 4) == 0) {

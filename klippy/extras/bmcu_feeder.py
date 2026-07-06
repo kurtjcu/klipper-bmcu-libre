@@ -283,14 +283,17 @@ class BmcuFeeder:
         gcmd.respond_info("BMCU: ENABLE sent — check BMCU_STATUS")
 
     def _cmd_disconnect(self, gcmd):
-        """Stop polling and release serial port."""
+        """Send DISABLE, stop polling, and release serial port."""
         if self._poll_timer_handle is not None:
             self.reactor.unregister_timer(self._poll_timer_handle)
             self._poll_timer_handle = None
         if self._serial is not None:
+            self._serial.send("DISABLE\n")
+            import time as _time
+            _time.sleep(0.2)
             self._serial.disconnect()
             self._serial = None
-            gcmd.respond_info("BMCU: serial port released — safe to flash")
+            gcmd.respond_info("BMCU: disabled and serial port released — safe to flash")
         else:
             gcmd.respond_info("BMCU: already disconnected")
 
