@@ -16,6 +16,7 @@
 #include "ch32v20x_gpio.h"
 #include "ch32v20x_rcc.h"
 #include "ch32v20x_iwdg.h"
+#include "ch32v20x_misc.h"
 #include "Motion_control.h"
 #include "many_soft_AS5600.h"
 #include "ADC_DMA.h"
@@ -56,6 +57,30 @@ static bool     angle_initialized[4]  = {false, false, false, false};
 
 static int as5600_boot_status[4] = {0, 0, 0, 0};  /* cached at boot */
 
+/* ---------- Interrupt-driven RX ring buffer ---------- */
+
+#define IRQ_RX_BUF_SIZE 128
+static volatile char    irq_rx_buf[IRQ_RX_BUF_SIZE];
+static volatile uint8_t irq_rx_head = 0;  /* written by ISR */
+static volatile uint8_t irq_rx_tail = 0;  /* read by main loop */
+
+/* USART1 RX interrupt handler — buffers incoming bytes so they aren't
+   lost during slow I2C operations in the main loop. */
+extern "C" void USART1_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+extern "C" void USART1_IRQHandler(void) {
+    if (USART1->STATR & USART_FLAG_RXNE) {
+        char c = (char)(USART1->DATAR & 0xFF);
+        uint8_t next = (irq_rx_head + 1) % IRQ_RX_BUF_SIZE;
+        if (next != irq_rx_tail) {  /* drop on overflow */
+            irq_rx_buf[irq_rx_head] = c;
+            irq_rx_head = next;
+        }
+    }
+    if (USART1->STATR & USART_FLAG_ORE) {
+        (void)USART1->DATAR;  /* clear overrun */
+    }
+}
+
 /* ---------- RX line buffer ---------- */
 
 static char    rx_buf[UART_RX_BUF_SIZE];
@@ -75,15 +100,13 @@ static void usart2_send_string(const char *s) {
 }
 
 static int usart2_rx_available(void) {
-    uint16_t sta = USART1->STATR;
-    if (sta & USART_FLAG_ORE) {
-        (void)USART1->DATAR;  /* clear ORE by reading DATAR */
-    }
-    return (sta & USART_FLAG_RXNE) ? 1 : 0;
+    return (irq_rx_head != irq_rx_tail) ? 1 : 0;
 }
 
 static uint8_t usart2_rx_byte(void) {
-    return (uint8_t)(USART1->DATAR & 0xFF);
+    uint8_t c = (uint8_t)irq_rx_buf[irq_rx_tail];
+    irq_rx_tail = (irq_rx_tail + 1) % IRQ_RX_BUF_SIZE;
+    return c;
 }
 
 /* ---------- feed distance functions ---------- */
@@ -153,10 +176,8 @@ static int pct_to_pwm(int pct) {
 /* ---------- STATUS response ---------- */
 
 static void send_status_response(void) {
-    /* Refresh sensors on demand */
+    /* Sensors are updated by Motion_control_run() in the main loop */
     if (hw_enabled) {
-        MC_AS5600.updata_angle();
-        MC_AS5600.updata_stu();
         for (int ch = 0; ch < 4; ch++)
             update_feed_distance(ch);
     }
@@ -487,9 +508,21 @@ void uart_protocol_init(void) {
     u.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
     u.USART_Mode                = USART_Mode_Tx | USART_Mode_Rx;
     USART_Init(USART1, &u);
+
+    /* Enable USART1 RX interrupt for non-blocking receive */
+    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
+    NVIC_InitTypeDef nvic = {0};
+    nvic.NVIC_IRQChannel = USART1_IRQn;
+    nvic.NVIC_IRQChannelPreemptionPriority = 1;
+    nvic.NVIC_IRQChannelSubPriority = 0;
+    nvic.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&nvic);
+
     USART_Cmd(USART1, ENABLE);
 
     rx_pos = 0;
+    irq_rx_head = 0;
+    irq_rx_tail = 0;
 
     /* Init feed distance tracking from AS5600 (already init'd by Motion_control_init) */
     for (int ch = 0; ch < 4; ch++) {
