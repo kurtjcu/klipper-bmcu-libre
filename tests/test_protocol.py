@@ -160,6 +160,36 @@ class BMCUTester:
             except ValueError:
                 self.assert_true(f"mm[{i}] is float", False, f"got {v}")
 
+    def test_feed_continuous_accumulation(self):
+        """Phase 6: mm= for ch=0 advances monotonically while motor is running."""
+        print("\n[test_feed_continuous_accumulation] Phase 6")
+        # Ensure motor is enabled before starting (Pitfall 4: test cannot
+        # rely on prior ENABLE state from a previous test)
+        self.send_recv("ENABLE")
+        self.send_recv("RUN 0")
+
+        mm_values = []
+        for _ in range(6):
+            time.sleep(0.5)
+            resp = self.send_recv("STATUS")
+            m = re.search(r"ch=0 [^\n]*mm=(-?[\d.]+)", resp)
+            if m:
+                mm_values.append(float(m.group(1)))
+
+        self.send_recv("STOP 0")
+
+        self.assert_true(
+            "At least 3 STATUS samples collected",
+            len(mm_values) >= 3,
+            f"got {len(mm_values)} samples",
+        )
+        monotonic = all(mm_values[i + 1] > mm_values[i] for i in range(len(mm_values) - 1))
+        self.assert_true(
+            "mm= values increase monotonically during motor run",
+            monotonic,
+            f"values={mm_values}",
+        )
+
 
 def main():
     args = make_parser().parse_args()
@@ -181,6 +211,7 @@ def main():
         t.test_as5600_state,
         t.test_error_handling,
         t.test_feed_distance,
+        t.test_feed_continuous_accumulation,
     ]
 
     for test in tests:
