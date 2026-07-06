@@ -295,7 +295,7 @@ int main(void)
         Motion_control_run(error);
         RGB_update();
 #else
-        IWDG->CTLR = 0xAAAA;
+        Motion_control_run(0);
         uart_protocol_tick();
 #endif
     }

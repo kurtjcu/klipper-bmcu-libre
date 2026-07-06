@@ -48,20 +48,30 @@ class BmcuSerial:
         s = serial.Serial()
         s.port = self._port
         s.baudrate = self._baud
-        s.timeout = 0
+        s.timeout = 2  # blocking mode for ENABLE handshake
         s.dsrdtr = False
         s.rtscts = False
         s.open()
         # CH340 RTS controls NRST — keep deasserted to avoid resetting MCU
         s.dtr = True
         s.rts = False
-        self._serial = s
-        # Wait for boot, drain any boot message, then send ENABLE
+        # Wait for boot, drain any boot message
         _time.sleep(2)
-        s.read(s.in_waiting or 1)
+        s.reset_input_buffer()
+        # Send ENABLE and wait for response
         s.write(b"ENABLE\n")
-        _time.sleep(3)  # ENABLE runs motor self-test, takes a few seconds
-        s.read(s.in_waiting or 1)  # drain ENABLE response
+        resp = s.readline().decode('ascii', errors='replace').strip()
+        logger.info("BMCU: ENABLE response: %s" % resp)
+        if not resp.startswith("ENABLE ok"):
+            logger.warning("BMCU: unexpected ENABLE response, retrying...")
+            _time.sleep(3)
+            s.reset_input_buffer()
+            s.write(b"ENABLE\n")
+            resp = s.readline().decode('ascii', errors='replace').strip()
+            logger.info("BMCU: ENABLE retry response: %s" % resp)
+        # Switch to non-blocking for reactor fd-watching
+        s.timeout = 0
+        self._serial = s
         logger.info("BMCU: serial connected and enabled on %s" % self._port)
         self._fd_handle = self._reactor.register_fd(
             self._serial.fileno(), self._handle_rx)
@@ -252,6 +262,15 @@ class BmcuFeeder:
         self.gcode.register_command(
             'BMCU_RESET_FEED', self._cmd_reset_feed,
             desc="Reset BMCU feed distance counter: BMCU_RESET_FEED [CHANNEL=0]")
+        self.gcode.register_command(
+            'BMCU_ENABLE', self._cmd_enable,
+            desc="Send ENABLE to BMCU firmware (init hardware)")
+
+    def _cmd_enable(self, gcmd):
+        import time as _time
+        self._serial.send("ENABLE\n")
+        _time.sleep(5)  # wait for motor self-test
+        gcmd.respond_info("BMCU: ENABLE sent — check BMCU_STATUS")
 
     def _register_sensor_commands(self):
         """Register per-channel SET_BMCU_SENSOR mux commands.
