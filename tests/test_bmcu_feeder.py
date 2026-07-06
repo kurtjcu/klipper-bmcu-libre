@@ -1345,3 +1345,98 @@ class TestBmcuDiagnostics:
         gcmd = MockGcmd({})
         result = gcmd.get_int('CHANNEL', default=None)
         assert result is None
+
+
+# ===========================================================================
+# Phase 06 Plan 02 Task 1: TestFeedAccumulation (D-06)
+# ===========================================================================
+
+class TestFeedAccumulation:
+    """
+    Unit tests for feed_mm_since_reset accumulation in BmcuFeeder.
+
+    These tests inject mm= values directly into STATUS lines via _poll_status()
+    rather than converting from encoder counts. The GEAR_CIRCUMFERENCE_MM
+    firmware constant (placeholder 30.0f) does not affect these assertions —
+    the Klipper extra tracks whatever float the firmware emits in mm=.
+    """
+
+    def _make_feeder_with_channels(self, monkeypatch, ch_ids=(0,)):
+        """Helper: build a connected BmcuFeeder with the given channel IDs."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        for ch_id in ch_ids:
+            ch_cfg = MockConfig({'extruder': 'extruder'}, name='bmcu_channel %d' % ch_id)
+            ch_cfg.printer = cfg.printer
+            cfg.printer.add_object('bmcu_channel %d' % ch_id, BmcuChannel(ch_cfg))
+
+        serial_instances = []
+
+        def mock_serial_cls():
+            ms = MockSerial()
+            serial_instances.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        feeder._handle_connect()
+        return feeder, serial_instances
+
+    def _dispatch(self, feeder, ch_id, feed_mm, fil=1, mot=1, spd=50,
+                  direction='FWD', mag='ok', ins=1):
+        """Helper: inject a STATUS line and poll to update channel state."""
+        feeder._serial._lines = [
+            ('LINE', 'STATUS ok ch=%d ins=%d fil=%d mot=%d spd=%d dir=%s mm=%.1f mag=%s'
+             % (ch_id, ins, fil, mot, spd, direction, feed_mm, mag))
+        ]
+        feeder._poll_status(0.0)
+
+    def test_accumulates_across_polls(self, monkeypatch):
+        """feed_mm_since_reset accumulates as firmware mm= advances across polls."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        # First poll initialises _feed_mm_at_reset=10.0; feed_mm_since_reset starts at 0
+        self._dispatch(feeder, 0, 10.0)
+        self._dispatch(feeder, 0, 20.0)
+        self._dispatch(feeder, 0, 30.0)
+        status = feeder.get_status(0.0)
+        # delta = 30.0 - 10.0 (init snapshot)
+        assert status['channels']['0']['feed_mm_since_reset'] == pytest.approx(20.0)
+
+    def test_mm_stable_shows_zero_delta(self, monkeypatch):
+        """feed_mm_since_reset is zero when firmware mm= does not change between polls.
+
+        This documents the pre-fix bug scenario where the firmware did not
+        accumulate feed distance between polls, so the delta was always zero.
+        """
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        self._dispatch(feeder, 0, 50.0)  # init
+        self._dispatch(feeder, 0, 50.0)
+        self._dispatch(feeder, 0, 50.0)
+        status = feeder.get_status(0.0)
+        assert status['channels']['0']['feed_mm_since_reset'] == pytest.approx(0.0)
+
+    def test_negative_mm_accumulation(self, monkeypatch):
+        """feed_mm_since_reset is negative when firmware mm= decreases (reverse feed).
+
+        feed_mm_since_reset is signed per the project key decision 'Signed
+        feed_mm_since_reset (not absolute)'.
+        """
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        self._dispatch(feeder, 0, 100.0)  # init
+        self._dispatch(feeder, 0, 80.0)
+        status = feeder.get_status(0.0)
+        assert status['channels']['0']['feed_mm_since_reset'] == pytest.approx(-20.0)
+
+    def test_reset_clears_accumulation(self, monkeypatch):
+        """BMCU_RESET_FEED sets a new baseline; subsequent delta is from reset point."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        self._dispatch(feeder, 0, 10.0)  # init
+        self._dispatch(feeder, 0, 50.0)  # feed_mm_since_reset = 40.0
+        feeder._cmd_reset_feed(MockGcmd({}))
+        # After reset _feed_mm_at_reset = 50.0 (current firmware value)
+        self._dispatch(feeder, 0, 60.0)
+        status = feeder.get_status(0.0)
+        # delta = 60.0 - 50.0 reset point
+        assert status['channels']['0']['feed_mm_since_reset'] == pytest.approx(10.0)
