@@ -266,12 +266,49 @@ class BmcuFeeder:
         self.gcode.register_command(
             'BMCU_ENABLE', self._cmd_enable,
             desc="Send ENABLE to BMCU firmware (init hardware)")
+        self.gcode.register_command(
+            'BMCU_DISCONNECT', self._cmd_disconnect,
+            desc="Disconnect BMCU serial port (for flashing)")
+        self.gcode.register_command(
+            'BMCU_CONNECT', self._cmd_connect,
+            desc="Reconnect BMCU serial port after flashing")
 
     def _cmd_enable(self, gcmd):
         import time as _time
+        if self._serial is None:
+            gcmd.respond_info("BMCU: not connected — run BMCU_CONNECT first")
+            return
         self._serial.send("ENABLE\n")
         _time.sleep(5)  # wait for motor self-test
         gcmd.respond_info("BMCU: ENABLE sent — check BMCU_STATUS")
+
+    def _cmd_disconnect(self, gcmd):
+        """Stop polling and release serial port."""
+        if self._poll_timer_handle is not None:
+            self.reactor.unregister_timer(self._poll_timer_handle)
+            self._poll_timer_handle = None
+        if self._serial is not None:
+            self._serial.disconnect()
+            self._serial = None
+            gcmd.respond_info("BMCU: serial port released — safe to flash")
+        else:
+            gcmd.respond_info("BMCU: already disconnected")
+
+    def _cmd_connect(self, gcmd):
+        """Reconnect serial port and resume polling."""
+        if self._serial is not None:
+            gcmd.respond_info("BMCU: already connected")
+            return
+        try:
+            self._serial = BmcuSerial(self.serial_port, self.baud, self.reactor)
+            self._serial.connect()
+            self._poll_timer_handle = self.reactor.register_timer(
+                self._poll_status,
+                self.reactor.monotonic() + self.poll_interval)
+            gcmd.respond_info("BMCU: reconnected and polling on %s"
+                              % self.serial_port)
+        except Exception as e:
+            gcmd.respond_info("BMCU: reconnect failed — %s" % str(e))
 
     def _register_sensor_commands(self):
         """Register per-channel SET_BMCU_SENSOR mux commands.
