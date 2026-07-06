@@ -126,13 +126,16 @@ static uint8_t usart2_rx_byte(void) {
 /* ---------- feed distance functions ---------- */
 
 static void update_feed_distance(int ch) {
+    if (MC_AS5600.magnet_stu[ch] == -1) return;
     uint16_t now = MC_AS5600.raw_angle[ch];
     if (!angle_initialized[ch]) {
         prev_angle[ch] = now;
         angle_initialized[ch] = true;
         return;
     }
-    int16_t delta = (int16_t)(now - prev_angle[ch]);
+    int32_t delta = (int32_t)now - (int32_t)prev_angle[ch];
+    if (delta > 2048)  delta -= 4096;
+    if (delta < -2048) delta += 4096;
     feed_counts[ch] += delta;
     prev_angle[ch] = now;
 }
@@ -190,12 +193,8 @@ static int pct_to_pwm(int pct) {
 /* ---------- STATUS response ---------- */
 
 static void send_status_response(void) {
-    /* Sensors are updated by Motion_control_run() in the main loop */
-    if (hw_enabled) {
-        for (int ch = 0; ch < 4; ch++)
-            update_feed_distance(ch);
-    }
-
+    /* Sensors are updated by Motion_control_run() in the main loop.
+       Feed distance is accumulated every tick in uart_protocol_tick(). */
     char buf[256];
     int  pos = 0;
 
@@ -638,6 +637,8 @@ void uart_protocol_tick(void) {
                 bool fil = (MC_ONLINE_key_stu[ch] != 0);
                 led_set_ch(ch, fil ? 0 : 255, fil ? 255 : 0, 0);
             }
+
+            update_feed_distance(ch);
         }
     }
 
