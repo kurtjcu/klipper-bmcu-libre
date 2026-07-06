@@ -73,14 +73,17 @@ class MockReactor:
 # ---------------------------------------------------------------------------
 
 class MockSerial:
-    def __init__(self, port, baud, timeout=None):
+    def __init__(self, port=None, baud=None, timeout=None):
         self.port = port
         self.baud = baud
         self.timeout = timeout
         self._written = b""
         self._read_data = b""
-        self.is_open = True
+        self.is_open = False
         self._raise_on_read = None   # set to an OSError to simulate read errors
+
+    def open(self):
+        self.is_open = True
 
     def fileno(self):
         return 99
@@ -92,8 +95,14 @@ class MockSerial:
         self._read_data = self._read_data[size:]
         return data
 
+    def readline(self):
+        return b"ENABLE ok\n"
+
     def write(self, data):
         self._written += data
+
+    def reset_input_buffer(self):
+        pass
 
     def close(self):
         self.is_open = False

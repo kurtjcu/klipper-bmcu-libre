@@ -25,10 +25,10 @@ class TestBmcuSerial:
         """Helper: create a BmcuSerial with a patched serial.Serial."""
         reactor = MockReactor()
         if mock_serial_instance is None:
-            mock_serial_instance = MockSerial('/dev/ttyUSB0', 115200, timeout=0)
+            mock_serial_instance = MockSerial()
         monkeypatch.setattr(
             'klippy.extras.bmcu_feeder.serial.Serial',
-            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+            lambda: MockSerial()
         )
         s = BmcuSerial('/dev/ttyUSB0', 115200, reactor)
         return s, reactor, mock_serial_instance
@@ -38,8 +38,8 @@ class TestBmcuSerial:
         reactor = MockReactor()
         created = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             created.append(ms)
             return ms
 
@@ -56,8 +56,8 @@ class TestBmcuSerial:
         """BmcuSerial.send() writes ASCII-encoded bytes to the serial port."""
         created = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             created.append(ms)
             return ms
 
@@ -65,6 +65,7 @@ class TestBmcuSerial:
         reactor = MockReactor()
         s = BmcuSerial('/dev/ttyUSB0', 115200, reactor)
         s.connect()
+        created[0]._written = b""  # clear ENABLE handshake bytes written during connect()
         s.send("RUN 0\n")
 
         assert created[0]._written == b"RUN 0\n"
@@ -73,8 +74,8 @@ class TestBmcuSerial:
         """_handle_rx assembles complete newline-delimited lines."""
         created = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             created.append(ms)
             return ms
 
@@ -94,8 +95,8 @@ class TestBmcuSerial:
         """_handle_rx buffers partial lines (no newline) and returns nothing."""
         created = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             created.append(ms)
             return ms
 
@@ -113,8 +114,8 @@ class TestBmcuSerial:
         """_handle_rx returns ('ERROR', message) when serial.read raises OSError."""
         created = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             created.append(ms)
             return ms
 
@@ -135,8 +136,8 @@ class TestBmcuSerial:
         """disconnect() unregisters the fd handle and closes the serial port."""
         created = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             created.append(ms)
             return ms
 
@@ -238,7 +239,7 @@ class TestBmcuFeeder:
         # Monkeypatch serial so _handle_connect doesn't fail opening the port
         monkeypatch.setattr(
             'klippy.extras.bmcu_feeder.serial.Serial',
-            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+            lambda: MockSerial()
         )
 
         feeder._handle_connect()
@@ -258,8 +259,8 @@ class TestBmcuFeeder:
 
         serial_instances = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             serial_instances.append(ms)
             return ms
 
@@ -283,7 +284,7 @@ class TestBmcuFeeder:
 
         monkeypatch.setattr(
             'klippy.extras.bmcu_feeder.serial.Serial',
-            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+            lambda: MockSerial()
         )
 
         feeder._handle_connect()
@@ -324,13 +325,16 @@ class TestBmcuGcodeCommands:
 
         serial_instances = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             serial_instances.append(ms)
             return ms
 
         monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
         feeder._handle_connect()
+        # Clear ENABLE handshake bytes so tests can assert on post-connect writes only
+        for ms in serial_instances:
+            ms._written = b""
         return feeder, serial_instances
 
     def test_cmd_run(self, monkeypatch):
@@ -437,8 +441,8 @@ class TestBmcuPolling:
 
         serial_instances = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             serial_instances.append(ms)
             return ms
 
@@ -556,7 +560,7 @@ class TestBmcuEventDispatch:
 
         monkeypatch.setattr(
             'klippy.extras.bmcu_feeder.serial.Serial',
-            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+            lambda: MockSerial()
         )
         feeder._handle_connect()
         return feeder
@@ -707,7 +711,7 @@ class TestBmcuStallDetection:
 
         monkeypatch.setattr(
             'klippy.extras.bmcu_feeder.serial.Serial',
-            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+            lambda: MockSerial()
         )
         feeder._handle_connect()
         return feeder
@@ -1018,8 +1022,8 @@ class TestBmcuGetStatus:
 
         serial_instances = []
 
-        def mock_serial_cls(port, baud, timeout):
-            ms = MockSerial(port, baud, timeout)
+        def mock_serial_cls():
+            ms = MockSerial()
             serial_instances.append(ms)
             return ms
 
@@ -1208,17 +1212,17 @@ class TestBmcuDiagnostics:
 
         monkeypatch.setattr(
             'klippy.extras.bmcu_feeder.serial.Serial',
-            lambda port, baud, timeout: MockSerial(port, baud, timeout)
+            lambda: MockSerial()
         )
         feeder._handle_connect()
         return feeder
 
     def _dispatch(self, feeder, ch_id, feed_mm, fil=1, mot=1, spd=50,
-                  direction='FWD', mag='ok'):
+                  direction='FWD', mag='ok', ins=1):
         """Helper: inject a STATUS line and poll to update channel state."""
         feeder._serial._lines = [
-            ('LINE', 'STATUS ok ch=%d fil=%d mot=%d spd=%d dir=%s mm=%.1f mag=%s'
-             % (ch_id, fil, mot, spd, direction, feed_mm, mag))
+            ('LINE', 'STATUS ok ch=%d ins=%d fil=%d mot=%d spd=%d dir=%s mm=%.1f mag=%s'
+             % (ch_id, ins, fil, mot, spd, direction, feed_mm, mag))
         ]
         feeder._poll_status(0.0)
 
