@@ -41,6 +41,28 @@ extern WS2812_class RGBOUT[4];
 
 static bool hw_enabled = false;
 
+/* ---------- LED status helpers ---------- */
+
+static void led_set_enabled(int ch) {
+    /* Red = enabled but stopped */
+    RGBOUT[ch].set_RGB(255, 0, 0, 0);
+    RGBOUT[ch].set_RGB(255, 0, 0, 1);
+    RGBOUT[ch].updata();
+}
+
+static void led_set_running(int ch) {
+    /* Green = motor running */
+    RGBOUT[ch].set_RGB(0, 255, 0, 0);
+    RGBOUT[ch].set_RGB(0, 255, 0, 1);
+    RGBOUT[ch].updata();
+}
+
+static void led_set_off(int ch) {
+    RGBOUT[ch].set_RGB(0, 0, 0, 0);
+    RGBOUT[ch].set_RGB(0, 0, 0, 1);
+    RGBOUT[ch].updata();
+}
+
 /* ---------- module-level motor state ---------- */
 
 static bool motor_running[4] = {false, false, false, false};
@@ -230,6 +252,7 @@ static void cmd_run(const char *args) {
     int pwm = pct_to_pwm(spd) * motor_dir[ch];
     Motion_control_set_PWM((uint8_t)ch, pwm);
     motor_running[ch] = true;
+    led_set_running(ch);
 
     char resp[32];
     snprintf(resp, sizeof(resp), "RUN ok ch=%d\n", ch);
@@ -247,6 +270,7 @@ static void cmd_stop(const char *args) {
 
     Motion_control_set_PWM((uint8_t)ch, 0);
     motor_running[ch] = false;
+    if (hw_enabled) led_set_enabled(ch);
 
     char resp[32];
     snprintf(resp, sizeof(resp), "STOP ok ch=%d\n", ch);
@@ -430,6 +454,10 @@ static void cmd_enable(const char *args) {
     }
 
     hw_enabled = true;
+
+    /* Set all channel LEDs to red (enabled but stopped) */
+    for (int ch = 0; ch < 4; ch++)
+        led_set_enabled(ch);
 
     /* Report sensor status */
     char buf[128];
