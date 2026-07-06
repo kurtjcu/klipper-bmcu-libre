@@ -11,12 +11,14 @@
  */
 
 #include "uart_protocol.h"
+#include "ws2812.h"
 #include "ch32v20x_usart.h"
 #include "ch32v20x_gpio.h"
 #include "ch32v20x_rcc.h"
 #include "ch32v20x_iwdg.h"
 #include "Motion_control.h"
 #include "many_soft_AS5600.h"
+#include "ADC_DMA.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,11 +26,19 @@
 /* Upstream AS5600 instance defined in Motion_control.cpp */
 extern AS5600_soft_IIC_many MC_AS5600;
 
+/* LED instances defined in main.cpp */
+extern WS2812_class SYS_RGB;
+extern WS2812_class RGBOUT[4];
+
 /* ---------- feed distance calibration constant ---------- */
 
 #ifndef GEAR_CIRCUMFERENCE_MM
 #define GEAR_CIRCUMFERENCE_MM 30.0f  /* placeholder — measure on physical hardware */
 #endif
+
+/* ---------- hardware enable state ---------- */
+
+static bool hw_enabled = false;
 
 /* ---------- module-level motor state ---------- */
 
@@ -143,6 +153,14 @@ static int pct_to_pwm(int pct) {
 /* ---------- STATUS response ---------- */
 
 static void send_status_response(void) {
+    /* Refresh sensors on demand */
+    if (hw_enabled) {
+        MC_AS5600.updata_angle();
+        MC_AS5600.updata_stu();
+        for (int ch = 0; ch < 4; ch++)
+            update_feed_distance(ch);
+    }
+
     char buf[256];
     int  pos = 0;
 
@@ -290,19 +308,146 @@ static void cmd_dir(const char *args) {
     usart2_send_string(resp);
 }
 
+/* ---------- LED command ---------- */
+
+/*
+ * LED <target> <R> <G> <B>
+ *   target: "sys" for SYS_RGB, or "0"-"3" for channel RGBOUT
+ *   R, G, B: 0-255
+ *
+ * LED off           — turn all LEDs off
+ * LED sys 255 0 0   — system LED red
+ * LED 0 0 255 0     — channel 0 LED green
+ */
+static void cmd_led(const char *args) {
+    /* LED off — clear everything */
+    if (strncmp(args, "off", 3) == 0) {
+        SYS_RGB.set_RGB(0, 0, 0, 0);
+        SYS_RGB.updata();
+        for (int i = 0; i < 4; i++) {
+            RGBOUT[i].set_RGB(0, 0, 0, 0);
+            RGBOUT[i].set_RGB(0, 0, 0, 1);
+            RGBOUT[i].updata();
+        }
+        usart2_send_string("LED ok all off\n");
+        return;
+    }
+
+    /* parse target */
+    int ch = -1;
+    const char *rest = args;
+    if (strncmp(args, "sys", 3) == 0) {
+        ch = -1; /* sentinel for SYS_RGB */
+        rest = args + 3;
+    } else if (args[0] >= '0' && args[0] <= '3') {
+        ch = args[0] - '0';
+        rest = args + 1;
+    } else {
+        usart2_send_string("ERR invalid LED target\n");
+        return;
+    }
+
+    if (*rest != ' ') {
+        usart2_send_string("ERR expected R G B\n");
+        return;
+    }
+    rest++;
+
+    /* parse R G B */
+    int r = atoi(rest);
+    while (*rest && *rest != ' ') rest++;
+    if (*rest == ' ') rest++;
+    int g = atoi(rest);
+    while (*rest && *rest != ' ') rest++;
+    if (*rest == ' ') rest++;
+    int b = atoi(rest);
+
+    if (r < 0) r = 0; if (r > 255) r = 255;
+    if (g < 0) g = 0; if (g > 255) g = 255;
+    if (b < 0) b = 0; if (b > 255) b = 255;
+
+    if (ch < 0) {
+        /* SYS_RGB — single LED */
+        SYS_RGB.set_RGB((uint8_t)r, (uint8_t)g, (uint8_t)b, 0);
+        SYS_RGB.updata();
+    } else {
+        /* Channel RGBOUT — 2 LEDs per channel, set both */
+        RGBOUT[ch].set_RGB((uint8_t)r, (uint8_t)g, (uint8_t)b, 0);
+        RGBOUT[ch].set_RGB((uint8_t)r, (uint8_t)g, (uint8_t)b, 1);
+        RGBOUT[ch].updata();
+    }
+
+    char resp[48];
+    if (ch < 0)
+        snprintf(resp, sizeof(resp), "LED ok sys r=%d g=%d b=%d\n", r, g, b);
+    else
+        snprintf(resp, sizeof(resp), "LED ok ch=%d r=%d g=%d b=%d\n", ch, r, g, b);
+    usart2_send_string(resp);
+}
+
+/* ---------- ENABLE command ---------- */
+
+static void cmd_enable(const char *args) {
+    (void)args;
+    if (hw_enabled) {
+        usart2_send_string("ENABLE ok already\n");
+        return;
+    }
+
+    /* Init ADC (filament switches) */
+    ADC_DMA_init();
+    ADC_DMA_wait_full();
+
+    /* Init motors and AS5600 sensors */
+    Motion_control_init();
+
+    /* Snapshot AS5600 angles for feed distance tracking */
+    for (int ch = 0; ch < 4; ch++) {
+        prev_angle[ch] = MC_AS5600.raw_angle[ch];
+        angle_initialized[ch] = true;
+        feed_counts[ch] = 0;
+    }
+
+    hw_enabled = true;
+
+    /* Report sensor status */
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+        "ENABLE ok fil=%d%d%d%d mag=%s/%s/%s/%s\n",
+        filament_channel_inserted[0] ? 1 : 0,
+        filament_channel_inserted[1] ? 1 : 0,
+        filament_channel_inserted[2] ? 1 : 0,
+        filament_channel_inserted[3] ? 1 : 0,
+        mag_status_str((int)MC_AS5600.magnet_stu[0]),
+        mag_status_str((int)MC_AS5600.magnet_stu[1]),
+        mag_status_str((int)MC_AS5600.magnet_stu[2]),
+        mag_status_str((int)MC_AS5600.magnet_stu[3]));
+    usart2_send_string(buf);
+}
+
 /* ---------- command dispatch ---------- */
 
 static void dispatch_command(const char *line) {
-    if (strncmp(line, "STATUS", 6) == 0) {
+    if (strncmp(line, "ENABLE", 6) == 0) {
+        cmd_enable(line + 6);
+    } else if (strncmp(line, "STATUS", 6) == 0) {
         send_status_response();
     } else if (strncmp(line, "RUN ", 4) == 0) {
+        if (!hw_enabled) { usart2_send_string("ERR not enabled\n"); return; }
         cmd_run(line + 4);
     } else if (strncmp(line, "STOP ", 5) == 0) {
+        if (!hw_enabled) { usart2_send_string("ERR not enabled\n"); return; }
         cmd_stop(line + 5);
     } else if (strncmp(line, "SPEED ", 6) == 0) {
+        if (!hw_enabled) { usart2_send_string("ERR not enabled\n"); return; }
         cmd_speed(line + 6);
     } else if (strncmp(line, "DIR ", 4) == 0) {
+        if (!hw_enabled) { usart2_send_string("ERR not enabled\n"); return; }
         cmd_dir(line + 4);
+    } else if (strncmp(line, "LED ", 4) == 0) {
+        cmd_led(line + 4);
+    } else if (strncmp(line, "LED", 3) == 0 && line[3] == '\0') {
+        usart2_send_string("ERR usage: LED <sys|0-3> <R> <G> <B> | LED off\n");
     } else {
         usart2_send_string("ERR unknown command\n");
     }
@@ -346,11 +491,19 @@ void uart_protocol_init(void) {
 
     rx_pos = 0;
 
+    /* Init feed distance tracking from AS5600 (already init'd by Motion_control_init) */
+    for (int ch = 0; ch < 4; ch++) {
+        prev_angle[ch] = MC_AS5600.raw_angle[ch];
+        angle_initialized[ch] = true;
+        feed_counts[ch] = 0;
+    }
+
     send_boot_message();
 }
 
 void uart_protocol_tick(void) {
     IWDG->CTLR = 0xAAAA; /* Feed watchdog */
+
 
     while (usart2_rx_available()) {
         char c = (char)usart2_rx_byte();

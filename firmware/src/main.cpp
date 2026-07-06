@@ -213,10 +213,8 @@ int main(void)
     IWDG->CTLR = 0xAAAA;
 
 #ifdef UART_PROTOCOL_ENABLED
-    /* In UART/Klipper mode, skip hardware-dependent inits that need motor power.
-       These will be revisited once Klipper controls power sequencing:
-       ADC_DMA_init, ADC_DMA_wait_full, MC_PULL_calibration_boot,
-       ams_datas_read, Flash_AMS_state_read, Motion_control_init */
+    /* In UART/Klipper mode, start UART only. Hardware (ADC, AS5600, motors)
+       is initialized on-demand via the ENABLE command. */
     uart_protocol_init();
 #else
     ADC_DMA_init();

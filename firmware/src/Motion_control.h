@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 void Motion_control_init();
+void MC_PWM_init();
 void Motion_control_set_PWM(uint8_t CHx, int PWM);
 void Motion_control_run(int error);
 bool Motion_control_save_dm_key_none_thresholds(void);
