@@ -64,6 +64,10 @@ Channels are numbered 0–3, corresponding to the physical BMCU channel connecto
 | `BMCU_STOP CHANNEL=N` | Stop motor on channel N (0–3) |
 | `BMCU_SPEED CHANNEL=N SPEED=S` | Set motor speed (0–100) on channel N |
 | `BMCU_DIR CHANNEL=N DIR=FWD\|REV` | Set motor direction on channel N |
+| `BMCU_ENABLE` | Send ENABLE to firmware (init hardware) |
+| `BMCU_DISCONNECT` | Disable firmware and release serial port for flashing |
+| `BMCU_CONNECT` | Reconnect serial port after flashing |
+| `BMCU_RESET_FEED` | Reset feed distance counter (all channels or `CHANNEL=N`) |
 | `SET_BMCU_SENSOR CHANNEL=N ENABLE=0\|1` | Disable/enable runout detection for channel N |
 
 ---

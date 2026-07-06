@@ -73,21 +73,68 @@ The `bmcu_libre` environment sets the following build flags:
 | `UART_PROTOCOL_ENABLED` | `1` | Enables the STATUS/RUN/STOP/SPEED/DIR protocol |
 | `DISABLE_BAMBUBUS` | `1` | Disables the BambuBus protocol (not needed for Klipper) |
 
+## Flashing while Klipper is running
+
+If Klipper is connected to the BMCU, you must release the serial port first:
+
+1. In the Klipper console (Mainsail/Fluidd), run: `BMCU_DISCONNECT`
+   - This sends `DISABLE` to the firmware (LEDs go to dim white blink)
+   - Releases the serial port so the flasher can access it
+2. Flash the firmware using one of the methods above
+3. In the Klipper console, run: `BMCU_CONNECT`
+   - Reconnects to the BMCU, sends `ENABLE`, and resumes polling
+
+> **Note:** If you changed the Klipper Python plugin (`bmcu_feeder.py`), a full Klipper restart is required (`sudo systemctl restart klipper`). The `RESTART` / `FIRMWARE_RESTART` console commands do not reload Python extras.
+
 ## Verify flash
 
-After flashing, unplug and replug the USB-C cable to let the firmware start in normal mode, then open a serial terminal:
+After flashing, the LEDs should blink dim white once every 5 seconds (not enabled state). Send `ENABLE` to activate:
 
 ```bash
 # Open a serial terminal at 115200 baud:
 screen /dev/serial/by-path/YOUR_PATH_HERE 115200
 
+# Type ENABLE and press Enter. You should see:
+# ENABLE ok fil=XXXX mag=ok/ok/ok/ok
+
 # Type STATUS and press Enter. You should see output like:
-# STATUS ok ch=0 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok ch=1 fil=0 mot=0 spd=0 dir=FWD mm=0.0 mag=ok ...
+# STATUS ok ch=0 ins=1 fil=1 mot=0 spd=0 dir=FWD mm=0.0 mag=ok ch=1 ins=1 fil=0 ...
 
 # Press Ctrl-A then K to exit screen.
 ```
 
 Replace `YOUR_PATH_HERE` with the full path from `ls /dev/serial/by-path/`.
+
+### LED status after ENABLE
+
+| LED Colour | Meaning |
+|------------|---------|
+| Dim white blink (every 5s) | Not enabled (waiting for ENABLE command) |
+| Solid green | Filament present |
+| Solid red | Filament absent |
+| Flashing white | Motor feeding |
+
+## Remote flashing (dev machine to Pi)
+
+If PlatformIO is not installed on the Pi, build locally and deploy:
+
+```bash
+# 1. Build on dev machine
+cd firmware
+pio run -e bmcu_libre
+
+# 2. Copy binary to Pi
+scp .pio/build/bmcu_libre/firmware.bin pi-host:~/klipper-bmcu-libre/firmware/
+
+# 3. Release serial port (in Klipper console)
+#    BMCU_DISCONNECT
+
+# 4. Flash from Pi
+ssh pi-host "python3 ~/klipper-bmcu-libre/tools/bmcu-flasher/bmcu_flasher.py ~/klipper-bmcu-libre/firmware/firmware.bin --mode usb"
+
+# 5. Reconnect (in Klipper console)
+#    BMCU_CONNECT
+```
 
 ## Next step
 
