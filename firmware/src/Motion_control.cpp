@@ -175,7 +175,7 @@ static float MC_PULL_pct_f[4] = {50.0f, 50.0f, 50.0f, 50.0f};
 static float  MC_PULL_stu_raw[4]        = {1.65f, 1.65f, 1.65f, 1.65f};
 static int8_t MC_PULL_stu[4]            = {0, 0, 0, 0};
 
-static uint8_t  MC_ONLINE_key_stu[4]    = {0, 0, 0, 0};
+uint8_t  MC_ONLINE_key_stu[4]    = {0, 0, 0, 0};
 static uint8_t  g_on_use_low_latch[4]   = {0, 0, 0, 0};   // 1=stop motor latch
 static uint8_t  g_on_use_jam_latch[4]   = {0, 0, 0, 0};   // 1=real jam -> 0xF06F
 static uint32_t g_on_use_hi_pwm_us[4]   = {0u, 0u, 0u, 0u};

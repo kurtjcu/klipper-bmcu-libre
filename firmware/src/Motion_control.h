@@ -18,6 +18,7 @@ extern uint8_t MC_PULL_pct[4];
 extern int8_t  MC_PULL_POLARITY[4];
 extern float   MC_DM_KEY_NONE_THRESH[4];
 extern bool    filament_channel_inserted[4];
+extern uint8_t MC_ONLINE_key_stu[4];
 
 // platformio.ini: -DBAMBU_BUS_AMS_NUM
 #ifndef BAMBU_BUS_AMS_NUM
