@@ -54,6 +54,22 @@ BMCU_STATUS
 
 You should see a per-channel status table showing filament presence, motor state, and feed distance for each configured channel.
 
+### Available commands
+
+| Command | Description |
+|---------|-------------|
+| `BMCU_STATUS` | Print per-channel status table |
+| `BMCU_RUN CHANNEL=N` | Start feeder motor on channel N |
+| `BMCU_STOP CHANNEL=N` | Stop feeder motor on channel N |
+| `BMCU_SPEED CHANNEL=N SPEED=75` | Set motor speed (0-100%) |
+| `BMCU_DIR CHANNEL=N DIR=FWD` | Set motor direction (FWD/REV) |
+| `BMCU_ENABLE` | Send ENABLE to firmware (init hardware) |
+| `BMCU_DISCONNECT` | Disable firmware and release serial port (for flashing) |
+| `BMCU_CONNECT` | Reconnect serial port and resume polling |
+| `BMCU_RESET_FEED` | Reset feed distance counter for all channels |
+| `BMCU_RESET_FEED CHANNEL=N` | Reset feed distance counter for channel N |
+| `SET_BMCU_SENSOR CHANNEL=N ENABLE=0\|1` | Enable/disable sensor events for channel N |
+
 ## udev rules (optional)
 
 ### Why /dev/serial/by-path/?
