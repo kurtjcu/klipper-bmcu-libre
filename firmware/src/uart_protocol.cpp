@@ -16,6 +16,7 @@
 #include "ch32v20x_gpio.h"
 #include "ch32v20x_rcc.h"
 #include "ch32v20x_iwdg.h"
+#include "ch32v20x_tim.h"
 #include "ch32v20x_misc.h"
 #include "Motion_control.h"
 #include "many_soft_AS5600.h"
@@ -252,7 +253,6 @@ static void cmd_run(const char *args) {
     int pwm = pct_to_pwm(spd) * motor_dir[ch];
     Motion_control_set_PWM((uint8_t)ch, pwm);
     motor_running[ch] = true;
-    led_set_running(ch);
 
     char resp[32];
     snprintf(resp, sizeof(resp), "RUN ok ch=%d\n", ch);
@@ -270,7 +270,6 @@ static void cmd_stop(const char *args) {
 
     Motion_control_set_PWM((uint8_t)ch, 0);
     motor_running[ch] = false;
-    if (hw_enabled) led_set_enabled(ch);
 
     char resp[32];
     snprintf(resp, sizeof(resp), "STOP ok ch=%d\n", ch);
@@ -562,9 +561,38 @@ void uart_protocol_init(void) {
     send_boot_message();
 }
 
+/* Check if a motor channel is actually being driven (PWM != brake/stop).
+   When PWM=0 (stop), both compare registers are set to 1000 (brake).
+   When driving, one side has PWM < 1000 and other has 0. */
+static bool motor_is_active(int ch) {
+    uint16_t c1, c2;
+    switch (ch) {
+    case 3: c1 = TIM2->CH1CVR; c2 = TIM2->CH2CVR; break;
+    case 2: c1 = TIM3->CH1CVR; c2 = TIM3->CH2CVR; break;
+    case 1: c1 = TIM4->CH1CVR; c2 = TIM4->CH2CVR; break;
+    case 0: c1 = TIM4->CH3CVR; c2 = TIM4->CH4CVR; break;
+    default: return false;
+    }
+    /* Brake = both 1000, coast = both 0. Active = one side has PWM */
+    return !((c1 >= 1000 && c2 >= 1000) || (c1 == 0 && c2 == 0));
+}
+
 void uart_protocol_tick(void) {
     IWDG->CTLR = 0xAAAA; /* Feed watchdog */
 
+    /* Update LEDs based on actual motor state */
+    if (hw_enabled) {
+        for (int ch = 0; ch < 4; ch++) {
+            bool active = motor_is_active(ch);
+            if (active && !motor_running[ch]) {
+                motor_running[ch] = true;
+                led_set_running(ch);
+            } else if (!active && motor_running[ch]) {
+                motor_running[ch] = false;
+                led_set_enabled(ch);
+            }
+        }
+    }
 
     while (usart2_rx_available()) {
         char c = (char)usart2_rx_byte();
