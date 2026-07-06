@@ -43,11 +43,28 @@ class BmcuSerial:
         self._lines = []   # (kind, content) tuples — drained by get_lines()
 
     def connect(self):
-        """Open serial port and register fd with reactor."""
-        self._serial = serial.Serial(self._port, self._baud, timeout=0)
+        """Open serial port, send ENABLE, and register fd with reactor."""
+        import time as _time
+        s = serial.Serial()
+        s.port = self._port
+        s.baudrate = self._baud
+        s.timeout = 0
+        s.dsrdtr = False
+        s.rtscts = False
+        s.open()
+        # CH340 RTS controls NRST — keep deasserted to avoid resetting MCU
+        s.dtr = True
+        s.rts = False
+        self._serial = s
+        # Wait for boot, drain any boot message, then send ENABLE
+        _time.sleep(2)
+        s.read(s.in_waiting or 1)
+        s.write(b"ENABLE\n")
+        _time.sleep(3)  # ENABLE runs motor self-test, takes a few seconds
+        s.read(s.in_waiting or 1)  # drain ENABLE response
+        logger.info("BMCU: serial connected and enabled on %s" % self._port)
         self._fd_handle = self._reactor.register_fd(
             self._serial.fileno(), self._handle_rx)
-        logger.info("BMCU: serial connected on %s" % self._port)
 
     def disconnect(self):
         """Unregister fd and close serial port."""
