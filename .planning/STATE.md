@@ -1,8 +1,8 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: Refinement & Compatibility
-status: milestone_complete
+milestone: v1.2
+milestone_name: Hardware Validation & V2.2 Compatibility
+status: in_progress
 stopped_at: ""
 last_updated: "2026-05-02T00:00:00Z"
 last_activity: 2026-05-02 -- v1.1 milestone complete
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-02)
 
 **Core value:** Any BMCU 370C owner can plug it into their Klipper printer with a USB-C cable and get per-channel filament runout/blockage detection and feeder control — no BambuBus, no RS485 adapter, no ESP32 bridge.
-**Current focus:** v1.1 complete — planning next milestone
+**Current focus:** v1.2 Hardware Validation & V2.2 Compatibility
 
 ## Current Position
 
-Milestone: v1.1 Refinement & Compatibility — COMPLETE
-Status: All phases shipped, milestone archived
-Last activity: 2026-05-02 -- v1.1 milestone complete
+Milestone: v1.2 Hardware Validation & V2.2 Compatibility
+Status: In progress — phases 6-11 planned
+Last activity: 2026-07-06 -- V2.2 board validated, ENABLE/LED/interrupt-RX/motion-control shipped
 
 ```
 v1.1 Progress: [██████████] 100% (2/2 phases) — SHIPPED

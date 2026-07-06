@@ -24,6 +24,17 @@
 
 </details>
 
+### v1.2 Hardware Validation & V2.2 Compatibility
+
+- [ ] Phase 6: Feed Distance Tracking (fix AS5600 polling — mm must accumulate during motor runs, not just on STATUS)
+- [ ] Phase 7: Direction Mapping (FWD ejects on V2.2 — add direction_invert config or swap in firmware)
+- [ ] Phase 8: Filament Sensor Investigation (fil= always 1 — identify V2.2 sensor type, fix ADC/GPIO mapping)
+- [ ] Phase 9: All Channels Live (enable ch2→T2, ch3→T3, test all 4 under load)
+- [ ] Phase 10: ENABLE Boot Timing (replace blocking sleep with faster handshake or auto-enable)
+- [ ] Phase 11: Print Test (end-to-end print with BMCU buffer feeding on Tapchanger)
+
+</details>
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -33,3 +44,9 @@
 | 3. Buffer Mode and Docs | v1.0 | 2/2 | Complete | 2026-05-01 |
 | 4. Stall Detection Hardening | v1.1 | 1/1 | Complete | 2026-05-01 |
 | 5. Feed Diagnostics | v1.1 | 1/1 | Complete | 2026-05-01 |
+| 6. Feed Distance Tracking | v1.2 | 0/1 | Planned | — |
+| 7. Direction Mapping | v1.2 | 0/1 | Planned | — |
+| 8. Filament Sensor Investigation | v1.2 | 0/1 | Planned | — |
+| 9. All Channels Live | v1.2 | 0/1 | Planned | — |
+| 10. ENABLE Boot Timing | v1.2 | 0/1 | Planned | — |
+| 11. Print Test | v1.2 | 0/1 | Planned | — |
