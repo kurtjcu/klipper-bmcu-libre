@@ -130,6 +130,7 @@ class BmcuChannel:
         self.extruder = config.get('extruder', None)
         self.event_delay = config.getfloat('event_delay', 3., minval=0.)
         self.pause_on_runout = config.getboolean('pause_on_runout', True)
+        self.direction_invert = config.getboolean('direction_invert', False)
         self.stall_threshold_mm = config.getfloat('stall_threshold_mm', 0.5,
                                                    minval=0.1)
         self.stall_debounce_count = config.getint('stall_debounce_count', 3,
@@ -354,7 +355,12 @@ class BmcuFeeder:
         if ch_id not in self._channels:
             gcmd.respond_info("BMCU: channel %d not configured" % ch_id)
             return
-        self._serial.send("DIR %d %s\n" % (ch_id, direction))
+        ch = self._channels[ch_id]
+        if ch.direction_invert:
+            wire_dir = 'REV' if direction == 'FWD' else 'FWD'
+        else:
+            wire_dir = direction
+        self._serial.send("DIR %d %s\n" % (ch_id, wire_dir))
 
     def _cmd_reset_feed(self, gcmd):
         ch_id = gcmd.get_int('CHANNEL', default=None, minval=0, maxval=3)
