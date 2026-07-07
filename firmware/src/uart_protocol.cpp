@@ -36,7 +36,7 @@ extern WS2812_class RGBOUT[4];
 /* ---------- feed distance calibration constant ---------- */
 
 #ifndef GEAR_CIRCUMFERENCE_MM
-#define GEAR_CIRCUMFERENCE_MM 30.0f  /* placeholder — measure on physical hardware */
+#define GEAR_CIRCUMFERENCE_MM 22.36f  /* calibrated from 347mm actual vs 365.6mm reported */
 #endif
 
 /* ---------- hardware enable state ---------- */
@@ -136,7 +136,7 @@ static void update_feed_distance(int ch) {
     int32_t delta = (int32_t)now - (int32_t)prev_angle[ch];
     if (delta > 2048)  delta -= 4096;
     if (delta < -2048) delta += 4096;
-    feed_counts[ch] += delta;
+    feed_counts[ch] -= delta;  /* negate: encoder direction is inverted */
     prev_angle[ch] = now;
 }
 
