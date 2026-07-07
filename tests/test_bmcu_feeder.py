@@ -421,6 +421,115 @@ class TestBmcuGcodeCommands:
 
 
 # ===========================================================================
+# Phase 07 Plan 01 Task 1: direction_invert config option (DIR-INV-01..05)
+# ===========================================================================
+
+class TestDirectionInvert:
+    """Tests for direction_invert config option on BmcuChannel."""
+
+    def _make_feeder_with_invert(self, monkeypatch, ch_ids=(0,),
+                                  invert_map=None):
+        """Helper: build a connected BmcuFeeder where channels may have
+        direction_invert set.  invert_map is {ch_id: True/False}."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        if invert_map is None:
+            invert_map = {}
+
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        for ch_id in ch_ids:
+            params = {'extruder': 'extruder'}
+            if ch_id in invert_map:
+                params['direction_invert'] = invert_map[ch_id]
+            ch_cfg = MockConfig(params, name='bmcu_channel %d' % ch_id)
+            ch_cfg.printer = cfg.printer
+            cfg.printer.add_object('bmcu_channel %d' % ch_id,
+                                   BmcuChannel(ch_cfg))
+
+        serial_instances = []
+
+        def mock_serial_cls():
+            ms = MockSerial()
+            serial_instances.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial',
+                            mock_serial_cls)
+        feeder._handle_connect()
+        for ms in serial_instances:
+            ms._written = b""
+        return feeder, serial_instances
+
+    def test_fwd_inverted_sends_rev(self, monkeypatch):
+        """BMCU_DIR CHANNEL=0 DIR=FWD with direction_invert=True sends 'DIR 0 REV\\n'."""
+        feeder, serials = self._make_feeder_with_invert(
+            monkeypatch, ch_ids=(0,), invert_map={0: True})
+        ms = serials[0]
+
+        gcmd = MockGcmd({'CHANNEL': 0, 'DIR': 'FWD'})
+        feeder._cmd_dir(gcmd)
+        assert ms._written == b"DIR 0 REV\n", (
+            "direction_invert=True: FWD must be sent as REV on wire")
+
+    def test_fwd_not_inverted_sends_fwd(self, monkeypatch):
+        """BMCU_DIR CHANNEL=0 DIR=FWD with direction_invert=False (default) sends 'DIR 0 FWD\\n'."""
+        feeder, serials = self._make_feeder_with_invert(
+            monkeypatch, ch_ids=(0,), invert_map={0: False})
+        ms = serials[0]
+
+        gcmd = MockGcmd({'CHANNEL': 0, 'DIR': 'FWD'})
+        feeder._cmd_dir(gcmd)
+        assert ms._written == b"DIR 0 FWD\n", (
+            "direction_invert=False: FWD must be sent as FWD on wire")
+
+    def test_rev_inverted_sends_fwd(self, monkeypatch):
+        """BMCU_DIR CHANNEL=0 DIR=REV with direction_invert=True sends 'DIR 0 FWD\\n'."""
+        feeder, serials = self._make_feeder_with_invert(
+            monkeypatch, ch_ids=(0,), invert_map={0: True})
+        ms = serials[0]
+
+        gcmd = MockGcmd({'CHANNEL': 0, 'DIR': 'REV'})
+        feeder._cmd_dir(gcmd)
+        assert ms._written == b"DIR 0 FWD\n", (
+            "direction_invert=True: REV must be sent as FWD on wire")
+
+    def test_status_dir_stored_raw(self, monkeypatch):
+        """STATUS dir=REV on channel with direction_invert=True stores 'REV' raw (no inversion)."""
+        feeder, serials = self._make_feeder_with_invert(
+            monkeypatch, ch_ids=(0,), invert_map={0: True})
+
+        # Inject a STATUS line with dir=REV directly
+        feeder._serial._lines = [
+            ('LINE',
+             'STATUS ok ch=0 ins=1 fil=1 mot=1 spd=50 dir=REV mm=0.0 mag=ok')
+        ]
+        feeder._poll_status(0.0)
+
+        assert feeder._channels[0].state['direction'] == 'REV', (
+            "STATUS dir= must be stored raw — direction_invert must not affect "
+            "the value written to ch.state['direction']")
+
+    def test_channel_direction_invert_config(self, monkeypatch):
+        """BmcuChannel parses direction_invert from config correctly."""
+        from klippy.extras.bmcu_feeder import BmcuChannel
+
+        cfg_true = MockConfig(
+            {'extruder': 'extruder', 'direction_invert': True},
+            name='bmcu_channel 0')
+        ch_true = BmcuChannel(cfg_true)
+        assert ch_true.direction_invert is True, (
+            "direction_invert: True must set ch.direction_invert = True")
+
+        cfg_default = MockConfig({'extruder': 'extruder'},
+                                  name='bmcu_channel 1')
+        ch_default = BmcuChannel(cfg_default)
+        assert ch_default.direction_invert is False, (
+            "Omitting direction_invert must default ch.direction_invert to False")
+
+
+# ===========================================================================
 # Plan 02-02 Task 2: Polling timer and STATUS response parser (KL-10, KL-15)
 # ===========================================================================
 
