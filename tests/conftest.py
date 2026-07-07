@@ -81,6 +81,8 @@ class MockSerial:
         self._read_data = b""
         self.is_open = False
         self._raise_on_read = None   # set to an OSError to simulate read errors
+        self._readline_queue = []    # sequential responses consumed by readline()
+        self._readline_first_call = True  # True until first unqueued readline call
 
     def open(self):
         self.is_open = True
@@ -96,6 +98,13 @@ class MockSerial:
         return data
 
     def readline(self):
+        if self._readline_queue:
+            return self._readline_queue.pop(0)
+        # First unqueued call returns b"" to simulate BOOT phase timeout;
+        # subsequent unqueued calls return b"ENABLE ok\n" for ENABLE handshake.
+        if self._readline_first_call:
+            self._readline_first_call = False
+            return b""
         return b"ENABLE ok\n"
 
     def write(self, data):
