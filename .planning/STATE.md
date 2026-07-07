@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Hardware Validation & V2.2 Compatibility
 status: executing
-stopped_at: Phase 10 context gathered
-last_updated: "2026-07-07T02:29:50.076Z"
+stopped_at: Phase 10 Plan 01 complete
+last_updated: "2026-07-07T00:00:00.000Z"
 last_activity: 2026-07-07
 progress:
   total_phases: 3
-  completed_phases: 1
-  total_plans: 2
-  completed_plans: 1
-  percent: 33
+  completed_phases: 2
+  total_plans: 3
+  completed_plans: 3
+  percent: 100
 ---
 
 # Project State
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-05-02)
 ## Current Position
 
 Phase: 10
-Plan: Not started
+Plan: 01 complete
 Milestone: v1.2 Hardware Validation & V2.2 Compatibility
-Status: Ready to execute
+Status: Phase 10 complete
 Last activity: 2026-07-07
 
 ```
@@ -77,6 +77,9 @@ Recent decisions affecting current work:
 - [v1.1 Phase 05-01]: First-poll initialization sets _feed_mm_at_reset to firmware value so feed_mm_since_reset starts at 0.0
 - [v1.0 Phase 02-klipper-extra]: reactor.register_fd with timeout=0 for serial I/O — no background threads (Klipper issue #2187)
 - [v1.0 Phase 02-klipper-extra]: Motor RUN/STOP use Motion_control_set_PWM directly, not ams_state_set_loaded
+- [v1.2 Phase 10-01]: BOOT wait uses _time.monotonic() deadline (5s) with break on empty readline — no sleep(2) or reset_input_buffer()
+- [v1.2 Phase 10-01]: ENABLE retry uses for/else idiom; raises Exception after 3 failures to halt Klipper startup cleanly
+- [v1.2 Phase 10-01]: _cmd_enable() sets timeout=2 temporarily, reads/echoes response, restores timeout=0
 
 ### Research Flags (from research/SUMMARY.md)
 
@@ -94,7 +97,7 @@ None currently active.
 
 ## Session Continuity
 
-Last session: 2026-07-07T01:57:21.153Z
-Stopped at: Phase 10 context gathered
-Resume file: .planning/phases/10-enable-boot-timing/10-CONTEXT.md
-Next action: Phases 4 and 5 complete -- v1.1 milestone progress at 100% for stall hardening and feed diagnostics
+Last session: 2026-07-07T00:00:00.000Z
+Stopped at: Phase 10 Plan 01 complete
+Resume file: None
+Next action: Phase 10 complete — BOOT-driven handshake implemented and tested
