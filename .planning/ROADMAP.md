@@ -26,19 +26,38 @@
 
 ### v1.2 Hardware Validation & V2.2 Compatibility
 
-- [x] Phase 6: Feed Distance Tracking (fix AS5600 polling — mm must accumulate during motor runs, not just on STATUS) (completed 2026-07-07)
-  **Plans:** 2 plans
-  Plans:
+<details>
+<summary>✅ Phase 6 (completed 2026-07-07)</summary>
 
+- [x] Phase 6: Feed Distance Tracking (2/2 plans) — fix AS5600 polling, mm accumulation during motor runs
   - [x] 06-01-PLAN.md — Firmware fix (wrap correction, magnet guard, tick-level accumulation) + MockSerial fixture fix
   - [x] 06-02-PLAN.md — Pytest feed accumulation tests + hardware integration test
-- [ ] Phase 7: Direction Mapping (FWD ejects on V2.2 — add direction_invert config or swap in firmware)
-- [ ] Phase 8: Filament Sensor Investigation (fil= always 1 — identify V2.2 sensor type, fix ADC/GPIO mapping)
-- [ ] Phase 9: All Channels Live (enable ch2→T2, ch3→T3, test all 4 under load)
-- [ ] Phase 10: ENABLE Boot Timing (replace blocking sleep with faster handshake or auto-enable)
-- [ ] Phase 11: Print Test (end-to-end print with BMCU buffer feeding on Tapchanger)
 
 </details>
+
+### Phase 7: Direction Mapping
+
+**Goal:** FWD command currently ejects filament on V2.2 hardware — add direction_invert config option or swap direction in firmware so FWD feeds inward.
+**Plans:** 1 plan
+
+Plans:
+- [ ] 07-01-PLAN.md — Add direction_invert config option, _cmd_dir inversion, tests, config docs
+
+### Phase 8: Filament Sensor Investigation
+
+**Goal:** fil= always reports 1 — identify V2.2 sensor type, fix ADC/GPIO mapping so filament presence is correctly detected.
+
+### Phase 9: All Channels Live
+
+**Goal:** Enable ch2→T2, ch3→T3, test all 4 channels under load with Tapchanger tool changes.
+
+### Phase 10: ENABLE Boot Timing
+
+**Goal:** Replace blocking sleep with faster handshake or auto-enable to reduce BMCU boot time.
+
+### Phase 11: Print Test
+
+**Goal:** End-to-end print with BMCU buffer feeding on Tapchanger — validate full workflow.
 
 ## Progress
 
