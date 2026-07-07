@@ -152,6 +152,148 @@ class TestBmcuSerial:
         assert len(reactor.registered_fds) == 0, "fd handle must be unregistered"
         assert not created[0].is_open, "serial port must be closed"
 
+    # -----------------------------------------------------------------------
+    # Phase 10 Plan 01 Task 2: BOOT-driven handshake tests
+    # -----------------------------------------------------------------------
+
+    def test_boot_wait_success(self, monkeypatch):
+        """connect() sees BOOT message, then ENABLE ok — timeout=0 and fd registered."""
+        reactor = MockReactor()
+        created = []
+
+        def mock_serial_cls():
+            ms = MockSerial()
+            created.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        s = BmcuSerial('/dev/ttyUSB0', 115200, reactor)
+        # Queue: BOOT message first, then ENABLE ok response
+        # Must set queue before connect() is called (MockSerial created inside connect)
+        # Use a flag to set queue after creation
+        original_cls = mock_serial_cls
+
+        created2 = []
+
+        def mock_serial_cls2():
+            ms = MockSerial()
+            ms._readline_queue = [
+                b"BOOT mag0=OK mag1=OK mag2=OK mag3=OK\n",
+                b"ENABLE ok fil=1234 mag=OK/OK/OK/OK\n",
+            ]
+            created2.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls2)
+        reactor2 = MockReactor()
+        s2 = BmcuSerial('/dev/ttyUSB0', 115200, reactor2)
+        s2.connect()
+
+        assert created2[0].timeout == 0, "Serial must be non-blocking (timeout=0) after connect"
+        assert len(reactor2.registered_fds) == 1, "fd must be registered with reactor"
+
+    def test_boot_wait_timeout_fallback(self, monkeypatch):
+        """connect() gets no BOOT within deadline, falls back to ENABLE — succeeds."""
+        reactor = MockReactor()
+        created = []
+
+        def mock_serial_cls():
+            ms = MockSerial()
+            # Queue: empty bytes simulates readline timeout (no BOOT),
+            # then ENABLE ok for the ENABLE attempt
+            ms._readline_queue = [b"", b"ENABLE ok\n"]
+            created.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        s = BmcuSerial('/dev/ttyUSB0', 115200, reactor)
+        # Should not raise even without BOOT message
+        s.connect()
+        assert created[0].timeout == 0, "Serial must be non-blocking after connect"
+
+    def test_enable_retry_loop(self, monkeypatch):
+        """connect() retries ENABLE after failure; second attempt succeeds."""
+        reactor = MockReactor()
+        created = []
+
+        def mock_serial_cls():
+            ms = MockSerial()
+            # BOOT seen, first ENABLE fails, second succeeds
+            ms._readline_queue = [b"BOOT mag0=OK\n", b"ERROR\n", b"ENABLE ok\n"]
+            created.append(ms)
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        sleep_calls = []
+        monkeypatch.setattr('klippy.extras.bmcu_feeder._time.sleep',
+                            lambda t: sleep_calls.append(t))
+        s = BmcuSerial('/dev/ttyUSB0', 115200, reactor)
+        s.connect()
+
+        assert len(reactor.registered_fds) == 1, "fd must be registered after retry success"
+        assert len(sleep_calls) == 1, "_time.sleep must be called once between retries"
+        assert sleep_calls[0] == pytest.approx(2.0), "retry delay must be 2.0 seconds"
+
+    def test_enable_all_retries_fail(self, monkeypatch):
+        """connect() raises Exception after 3 failed ENABLE attempts."""
+        reactor = MockReactor()
+
+        def mock_serial_cls():
+            ms = MockSerial()
+            # BOOT seen, then 3 ERROR responses
+            ms._readline_queue = [b"BOOT mag0=OK\n", b"ERROR\n", b"ERROR\n", b"ERROR\n"]
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        monkeypatch.setattr('klippy.extras.bmcu_feeder._time.sleep', lambda t: None)
+        s = BmcuSerial('/dev/ttyUSB0', 115200, reactor)
+        with pytest.raises(Exception, match="ENABLE handshake failed"):
+            s.connect()
+
+    def test_enable_ok_already_accepted(self, monkeypatch):
+        """connect() accepts 'ENABLE ok already' as a successful ENABLE response."""
+        reactor = MockReactor()
+
+        def mock_serial_cls():
+            ms = MockSerial()
+            ms._readline_queue = [b"BOOT mag0=OK\n", b"ENABLE ok already\n"]
+            return ms
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        s = BmcuSerial('/dev/ttyUSB0', 115200, reactor)
+        # Should not raise — "ENABLE ok already" starts with "ENABLE ok"
+        s.connect()
+        assert len(reactor.registered_fds) == 1
+
+    def test_cmd_enable_no_sleep(self, monkeypatch):
+        """_cmd_enable() sends ENABLE, reads response, echoes it — no sleep."""
+        from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
+
+        cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
+        feeder = BmcuFeeder(cfg)
+
+        ch_cfg = MockConfig({'extruder': 'extruder'}, name='bmcu_channel 0')
+        ch_cfg.printer = cfg.printer
+        cfg.printer.add_object('bmcu_channel 0', BmcuChannel(ch_cfg))
+
+        def mock_serial_cls():
+            return MockSerial()
+
+        monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
+        feeder._handle_connect()
+
+        sleep_calls = []
+        monkeypatch.setattr('klippy.extras.bmcu_feeder._time.sleep',
+                            lambda t: sleep_calls.append(t))
+
+        gcmd = MockGcmd({})
+        feeder._cmd_enable(gcmd)
+
+        assert len(sleep_calls) == 0, "_cmd_enable must not call _time.sleep"
+        assert len(gcmd._responses) == 1, "_cmd_enable must call gcmd.respond_info once"
+        assert "ENABLE" in gcmd._responses[0], "response must contain ENABLE"
+
+
 
 # ===========================================================================
 # Task 2: BmcuChannel and BmcuFeeder tests
