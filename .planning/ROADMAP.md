@@ -38,7 +38,7 @@
 ### Phase 7: Direction Mapping
 
 **Goal:** FWD command currently ejects filament on V2.2 hardware — add direction_invert config option or swap direction in firmware so FWD feeds inward.
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
 
@@ -74,7 +74,7 @@ Plans:
 | 4. Stall Detection Hardening | v1.1 | 1/1 | Complete | 2026-05-01 |
 | 5. Feed Diagnostics | v1.1 | 1/1 | Complete | 2026-05-01 |
 | 6. Feed Distance Tracking | v1.2 | 2/2 | Complete    | 2026-07-07 |
-| 7. Direction Mapping | v1.2 | 1/1 | Complete   | 2026-07-07 |
+| 7. Direction Mapping | v1.2 | 1/1 | Complete    | 2026-07-07 |
 | 8. Filament Sensor Investigation | v1.2 | 0/0 | Complete | 2026-07-07 |
 | 10. ENABLE Boot Timing | v1.2 | 0/1 | Planned | — |
 | 11. Print Test | v1.2 | 0/1 | Planned | — |
