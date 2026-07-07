@@ -41,19 +41,24 @@
 **Plans:** 1 plan
 
 Plans:
-- [ ] 07-01-PLAN.md — Add direction_invert config option, _cmd_dir inversion, tests, config docs
 
-### Phase 8: Filament Sensor Investigation
+- [x] 07-01-PLAN.md — Add direction_invert config option, _cmd_dir inversion, tests, config docs
 
-**Goal:** fil= always reports 1 — identify V2.2 sensor type, fix ADC/GPIO mapping so filament presence is correctly detected.
+<details>
+<summary>✅ Phase 8 (completed 2026-07-07)</summary>
 
-### Phase 9: All Channels Live
+- [x] Phase 8: Filament Sensor Investigation — fil= sensor working correctly on V2.2 hardware (resolved during hardware testing, no code changes needed)
 
-**Goal:** Enable ch2→T2, ch3→T3, test all 4 channels under load with Tapchanger tool changes.
+</details>
 
 ### Phase 10: ENABLE Boot Timing
 
-**Goal:** Replace blocking sleep with faster handshake or auto-enable to reduce BMCU boot time.
+**Goal:** Replace blocking sleep with BOOT-message-driven handshake and ENABLE retry loop to reduce Klipper startup delay.
+**Plans:** 1 plan
+
+Plans:
+
+- [ ] 10-01-PLAN.md — Rewrite connect() for BOOT wait + ENABLE retry, simplify _cmd_enable(), add 6 tests
 
 ### Phase 11: Print Test
 
@@ -69,8 +74,7 @@ Plans:
 | 4. Stall Detection Hardening | v1.1 | 1/1 | Complete | 2026-05-01 |
 | 5. Feed Diagnostics | v1.1 | 1/1 | Complete | 2026-05-01 |
 | 6. Feed Distance Tracking | v1.2 | 2/2 | Complete    | 2026-07-07 |
-| 7. Direction Mapping | v1.2 | 0/1 | Planned | — |
-| 8. Filament Sensor Investigation | v1.2 | 0/1 | Planned | — |
-| 9. All Channels Live | v1.2 | 0/1 | Planned | — |
+| 7. Direction Mapping | v1.2 | 1/1 | Complete   | 2026-07-07 |
+| 8. Filament Sensor Investigation | v1.2 | 0/0 | Complete | 2026-07-07 |
 | 10. ENABLE Boot Timing | v1.2 | 0/1 | Planned | — |
 | 11. Print Test | v1.2 | 0/1 | Planned | — |
