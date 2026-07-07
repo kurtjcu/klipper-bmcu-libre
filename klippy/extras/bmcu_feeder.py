@@ -12,6 +12,7 @@ Phase 2 plan 02: GCode commands, polling timer, STATUS response parser.
 import serial
 import logging
 import re
+import time as _time
 
 # ---------------------------------------------------------------------------
 # Module-level regex for parsing multi-channel STATUS response lines
@@ -43,32 +44,48 @@ class BmcuSerial:
         self._lines = []   # (kind, content) tuples — drained by get_lines()
 
     def connect(self):
-        """Open serial port, send ENABLE, and register fd with reactor."""
-        import time as _time
+        """Open serial port, wait for BOOT, send ENABLE, and register fd with reactor."""
+        MAX_ENABLE_ATTEMPTS = 3
+        ENABLE_RETRY_DELAY = 2.0
         s = serial.Serial()
         s.port = self._port
         s.baudrate = self._baud
-        s.timeout = 2  # blocking mode for ENABLE handshake
+        s.timeout = 5  # blocking mode for BOOT/ENABLE handshake
         s.dsrdtr = False
         s.rtscts = False
         s.open()
         # CH340 RTS controls NRST — keep deasserted to avoid resetting MCU
         s.dtr = True
         s.rts = False
-        # Wait for boot, drain any boot message
-        _time.sleep(2)
-        s.reset_input_buffer()
-        # Send ENABLE and wait for response
-        s.write(b"ENABLE\n")
-        resp = s.readline().decode('ascii', errors='replace').strip()
-        logger.info("BMCU: ENABLE response: %s" % resp)
-        if not resp.startswith("ENABLE ok"):
-            logger.warning("BMCU: unexpected ENABLE response, retrying...")
-            _time.sleep(3)
-            s.reset_input_buffer()
+        # Wait for BOOT message (5-second deadline)
+        boot_seen = False
+        deadline = _time.monotonic() + 5.0
+        while _time.monotonic() < deadline:
+            raw = s.readline()
+            if not raw:
+                break
+            text = raw.decode('ascii', errors='replace').strip()
+            if text:
+                logger.info("BMCU: boot line: %s" % text)
+            if text.startswith("BOOT"):
+                boot_seen = True
+                break
+        if not boot_seen:
+            logger.warning("BMCU: no BOOT message received within 5s — proceeding to ENABLE")
+        # Send ENABLE and retry up to MAX_ENABLE_ATTEMPTS times
+        for attempt in range(MAX_ENABLE_ATTEMPTS):
             s.write(b"ENABLE\n")
             resp = s.readline().decode('ascii', errors='replace').strip()
-            logger.info("BMCU: ENABLE retry response: %s" % resp)
+            logger.info("BMCU: ENABLE attempt %d response: %s" % (attempt + 1, resp))
+            if resp.startswith("ENABLE ok"):
+                break
+            logger.warning("BMCU: ENABLE attempt %d failed, retrying..." % (attempt + 1))
+            if attempt < MAX_ENABLE_ATTEMPTS - 1:
+                _time.sleep(ENABLE_RETRY_DELAY)
+        else:
+            raise Exception(
+                "BMCU: ENABLE handshake failed after %d attempts — "
+                "check wiring, firmware, and power" % MAX_ENABLE_ATTEMPTS)
         # Switch to non-blocking for reactor fd-watching
         s.timeout = 0
         self._serial = s
@@ -275,13 +292,14 @@ class BmcuFeeder:
             desc="Reconnect BMCU serial port after flashing")
 
     def _cmd_enable(self, gcmd):
-        import time as _time
         if self._serial is None:
             gcmd.respond_info("BMCU: not connected — run BMCU_CONNECT first")
             return
+        self._serial._serial.timeout = 2
         self._serial.send("ENABLE\n")
-        _time.sleep(5)  # wait for motor self-test
-        gcmd.respond_info("BMCU: ENABLE sent — check BMCU_STATUS")
+        resp = self._serial._serial.readline().decode('ascii', errors='replace').strip()
+        self._serial._serial.timeout = 0
+        gcmd.respond_info("BMCU: ENABLE response: %s" % resp)
 
     def _cmd_disconnect(self, gcmd):
         """Send DISABLE, stop polling, and release serial port."""
@@ -290,7 +308,6 @@ class BmcuFeeder:
             self._poll_timer_handle = None
         if self._serial is not None:
             self._serial.send("DISABLE\n")
-            import time as _time
             _time.sleep(0.2)
             self._serial.disconnect()
             self._serial = None
