@@ -58,6 +58,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DIAG-03 | Phase 5 | Complete |
 
 **Coverage:**
+
 - v1.1 requirements: 7 total
 - Mapped to phases: 7
 - Unmapped: 0

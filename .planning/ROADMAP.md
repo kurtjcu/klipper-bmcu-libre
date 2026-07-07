@@ -26,11 +26,12 @@
 
 ### v1.2 Hardware Validation & V2.2 Compatibility
 
-- [ ] Phase 6: Feed Distance Tracking (fix AS5600 polling — mm must accumulate during motor runs, not just on STATUS)
+- [x] Phase 6: Feed Distance Tracking (fix AS5600 polling — mm must accumulate during motor runs, not just on STATUS) (completed 2026-07-07)
   **Plans:** 2 plans
   Plans:
-  - [ ] 06-01-PLAN.md — Firmware fix (wrap correction, magnet guard, tick-level accumulation) + MockSerial fixture fix
-  - [ ] 06-02-PLAN.md — Pytest feed accumulation tests + hardware integration test
+
+  - [x] 06-01-PLAN.md — Firmware fix (wrap correction, magnet guard, tick-level accumulation) + MockSerial fixture fix
+  - [x] 06-02-PLAN.md — Pytest feed accumulation tests + hardware integration test
 - [ ] Phase 7: Direction Mapping (FWD ejects on V2.2 — add direction_invert config or swap in firmware)
 - [ ] Phase 8: Filament Sensor Investigation (fil= always 1 — identify V2.2 sensor type, fix ADC/GPIO mapping)
 - [ ] Phase 9: All Channels Live (enable ch2→T2, ch3→T3, test all 4 under load)
@@ -48,7 +49,7 @@
 | 3. Buffer Mode and Docs | v1.0 | 2/2 | Complete | 2026-05-01 |
 | 4. Stall Detection Hardening | v1.1 | 1/1 | Complete | 2026-05-01 |
 | 5. Feed Diagnostics | v1.1 | 1/1 | Complete | 2026-05-01 |
-| 6. Feed Distance Tracking | v1.2 | 0/2 | Planned | — |
+| 6. Feed Distance Tracking | v1.2 | 2/2 | Complete    | 2026-07-07 |
 | 7. Direction Mapping | v1.2 | 0/1 | Planned | — |
 | 8. Filament Sensor Investigation | v1.2 | 0/1 | Planned | — |
 | 9. All Channels Live | v1.2 | 0/1 | Planned | — |
