@@ -514,6 +514,10 @@ class BmcuFeeder:
         self._prev_mm[ch.channel_id] = ch.state['feed_mm']
 
     def _runout_handler(self, eventtime, ch):
+        self.gcode.respond_info(
+            "BMCU: filament runout on channel %d — pausing print" % ch.channel_id)
+        self.gcode.respond_info(
+            "BMCU_EVENT event=runout channel=%d" % ch.channel_id)
         if ch.pause_on_runout:
             pause_resume = self.printer.lookup_object('pause_resume')
             pause_resume.send_pause_command()
@@ -523,6 +527,12 @@ class BmcuFeeder:
         self._exec_gcode(ch, ch.insert_gcode)
 
     def _stall_handler(self, eventtime, ch):
+        self.gcode.respond_info(
+            "BMCU: blockage/stall on channel %d — running stall recovery" % ch.channel_id)
+        self.gcode.respond_info(
+            "BMCU_EVENT event=stall channel=%d delta_mm=%.2f total_stalls=%d" %
+            (ch.channel_id, getattr(ch, '_last_stall_delta_mm', 0.0),
+             ch._lifetime_stall_count))
         self._exec_gcode(ch, ch.stall_gcode)
 
     def _exec_gcode(self, ch, template):
@@ -534,6 +544,10 @@ class BmcuFeeder:
 
     def _handle_serial_error(self, msg):
         logging.error("BMCU serial error: %s" % msg)
+        self.gcode.respond_info(
+            "BMCU: serial error — interrupting print for running channels: %s" % msg)
+        self.gcode.respond_info(
+            "BMCU_EVENT event=serial_error msg=%s" % msg)
         for ch in self._channels.values():
             if ch.state.get('motor_running') and ch.sensor_enabled:
                 self.reactor.register_callback(
