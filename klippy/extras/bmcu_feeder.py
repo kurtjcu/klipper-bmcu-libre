@@ -148,13 +148,30 @@ class BmcuChannel:
         self.event_delay = config.getfloat('event_delay', 3., minval=0.)
         self.pause_on_runout = config.getboolean('pause_on_runout', True)
         self.direction_invert = config.getboolean('direction_invert', False)
-        self.stall_threshold_mm = config.getfloat('stall_threshold_mm', 0.5,
-                                                   minval=0.1)
-        self.stall_debounce_count = config.getint('stall_debounce_count', 3,
-                                                   minval=1)
+        # Drift-aware stall detection: compares Klipper's COMMANDED extrusion
+        # (via extruder.find_past_position) against BMCU MEASURED feed over a
+        # rolling window, rather than an absolute per-poll delta threshold.
+        self.min_commanded_mm = config.getfloat(
+            'min_commanded_mm', 1.0, minval=0.0)
+        self.slip_ratio = config.getfloat(
+            'slip_ratio', 0.5, minval=0.0, maxval=1.0)
+        self.stall_window_polls = config.getint(
+            'stall_window_polls', 3, minval=1)
         self.stall_startup_ignore_polls = config.getint(
             'stall_startup_ignore_polls', 2, minval=0)
-        self._stall_counter = 0
+        # Rolling window of (forward_commanded_delta, measured_delta) tuples,
+        # capped at stall_window_polls entries.
+        self._stall_window = []
+        self._prev_commanded_pos = None
+        self._prev_measured_pos = None
+        # Stashed window totals at fire time, read by _stall_handler.
+        self._stall_window_commanded = 0.0
+        self._stall_window_measured = 0.0
+        # Resolved at ready-time (BmcuFeeder._handle_ready): the extruder
+        # object for find_past_position, and whether stall detection is
+        # possible at all for this channel (False when extruder is None).
+        self._extruder_obj = None
+        self._stall_enabled = True
         self._startup_polls_remaining = 0
         self._direction_just_changed = False
         self._feed_mm_at_reset = 0.0
@@ -213,6 +230,7 @@ class BmcuFeeder:
         self._poll_timer_handle = None
         self._prev_mm = {}
         self._channels = {}
+        self._estimated_print_time = None
         self.printer.register_event_handler("klippy:connect",
                                             self._handle_connect)
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
@@ -243,7 +261,30 @@ class BmcuFeeder:
                 "BMCU: cannot open serial port %s: %s" % (self.serial_port, e))
 
     def _handle_ready(self):
-        """Start polling timer.  Must not raise exceptions per Klipper spec."""
+        """Resolve per-channel extruder objects, cache estimated_print_time,
+        and start the polling timer.  Must not raise exceptions per Klipper
+        spec — any lookup failure disables stall detection for that channel
+        rather than propagating.
+        """
+        self._estimated_print_time = self.printer.lookup_object(
+            'mcu').estimated_print_time
+        for ch in self._channels.values():
+            if ch.extruder is None:
+                ch._extruder_obj = None
+                ch._stall_enabled = False
+                logging.warning(
+                    "BMCU ch%d: no extruder configured — stall detection disabled"
+                    % ch.channel_id)
+                continue
+            try:
+                ch._extruder_obj = self.printer.lookup_object(ch.extruder)
+                ch._stall_enabled = True
+            except Exception:
+                ch._extruder_obj = None
+                ch._stall_enabled = False
+                logging.warning(
+                    "BMCU ch%d: extruder '%s' not found — stall detection disabled"
+                    % (ch.channel_id, ch.extruder))
         self._poll_timer_handle = self.reactor.register_timer(
             self._poll_status,
             self.reactor.monotonic() + self.poll_interval)
@@ -466,52 +507,99 @@ class BmcuFeeder:
                 ch.min_event_systime = self.reactor.NEVER
                 self.reactor.register_callback(
                     lambda et, c=ch: self._insert_handler(et, c))
-        # --- Motor start detection: reset startup grace and stall counter ---
+        # --- Motor start detection: reset startup grace and stall window ---
         old_mot = old_state.get('motor_running', False)
         new_mot = ch.state['motor_running']
         if not old_mot and new_mot:
             ch._startup_polls_remaining = ch.stall_startup_ignore_polls
-            ch._stall_counter = 0
+            self._reset_stall_window(ch)
 
         # --- Direction-change detection: reset _prev_mm and set suppression flag ---
         old_dir = old_state.get('direction', 'FWD')
         new_dir = ch.state['direction']
         if old_dir != new_dir:
             self._prev_mm[ch.channel_id] = ch.state['feed_mm']
-            ch._stall_counter = 0
+            self._reset_stall_window(ch)
             ch._direction_just_changed = True
 
-        # --- Debounced blockage detection ---
-        if ch.state['filament_present'] and ch.state['motor_running']:
-            if ch.channel_id in self._prev_mm:
-                delta = abs(ch.state['feed_mm'] - self._prev_mm[ch.channel_id])
-                if ch._direction_just_changed:
-                    # Skip stall-counter evaluation on the direction-change poll.
-                    ch._direction_just_changed = False
-                elif ch._startup_polls_remaining > 0:
-                    ch._startup_polls_remaining -= 1
-                    ch._stall_counter = 0
-                elif delta < ch.stall_threshold_mm:
-                    ch._stall_counter += 1
+        # --- Windowed cumulative commanded-vs-measured stall detection ---
+        # Compares Klipper's COMMANDED extrusion (extruder.find_past_position)
+        # against the BMCU's MEASURED feed (feed_mm) over a rolling window of
+        # stall_window_polls polls. Fires only when the cumulative gap between
+        # commanded and measured keeps widening across the whole window — a
+        # real jam — rather than an instantaneous per-poll delta, which
+        # false-trips on steady-state slip and transient phase lag.
+        if not ch._stall_enabled:
+            # No extruder configured (no ground truth) — stall detection is
+            # disabled entirely for this channel. Runout/insert are unaffected.
+            pass
+        elif ch.state['filament_present'] and ch.state['motor_running']:
+            if ch._direction_just_changed:
+                # Skip evaluation on the direction-change poll itself; take a
+                # fresh baseline next poll so a reversal can't manufacture a
+                # fake shortfall.
+                ch._direction_just_changed = False
+            elif ch._startup_polls_remaining > 0:
+                ch._startup_polls_remaining -= 1
+                self._reset_stall_window(ch)
+            else:
+                now_print_time = self._estimated_print_time(now)
+                commanded_pos = ch._extruder_obj.find_past_position(now_print_time)
+                measured_pos = ch.state['feed_mm']
+                if ch._prev_commanded_pos is None:
+                    # First sample after a reset — need a delta before we can
+                    # evaluate anything.
+                    ch._prev_commanded_pos = commanded_pos
+                    ch._prev_measured_pos = measured_pos
                 else:
-                    ch._stall_counter = 0
-                if (ch._stall_counter >= ch.stall_debounce_count
-                        and ch.stall_gcode is not None
-                        and now >= ch.min_event_systime
-                        and ch.sensor_enabled):
-                    ch._stall_counter = 0
-                    ch._lifetime_stall_count += 1
-                    ch.min_event_systime = self.reactor.NEVER
-                    logging.info("BMCU ch%d: blockage detected (delta_mm=%.2f, total_stalls=%d)" %
-                                 (ch.channel_id, delta, ch._lifetime_stall_count))
-                    ch._last_stall_delta_mm = delta
-                    self.reactor.register_callback(
-                        lambda et, c=ch: self._stall_handler(et, c))
+                    commanded_delta = commanded_pos - ch._prev_commanded_pos
+                    measured_delta = measured_pos - ch._prev_measured_pos
+                    ch._prev_commanded_pos = commanded_pos
+                    ch._prev_measured_pos = measured_pos
+                    # Retraction handling: only FORWARD commanded movement
+                    # contributes to window_commanded. A pure retraction/travel
+                    # poll (commanded_delta <= 0) adds 0, so window_commanded
+                    # stays below min_commanded_mm and no stall is evaluated.
+                    ch._stall_window.append(
+                        (max(commanded_delta, 0.0), measured_delta))
+                    if len(ch._stall_window) > ch.stall_window_polls:
+                        ch._stall_window.pop(0)
+                    window_commanded = sum(c for c, m in ch._stall_window)
+                    window_measured = sum(m for c, m in ch._stall_window)
+                    if (len(ch._stall_window) >= ch.stall_window_polls
+                            and window_commanded >= ch.min_commanded_mm
+                            and window_measured < window_commanded * ch.slip_ratio
+                            and now >= ch.min_event_systime
+                            and ch.sensor_enabled):
+                        ch._lifetime_stall_count += 1
+                        ch.min_event_systime = self.reactor.NEVER
+                        ch._stall_window_commanded = window_commanded
+                        ch._stall_window_measured = window_measured
+                        ratio = (window_measured / window_commanded
+                                  if window_commanded else 0.0)
+                        logging.info(
+                            "BMCU ch%d: blockage detected commanded=%.2fmm "
+                            "measured=%.2fmm ratio=%.2f total_stalls=%d" %
+                            (ch.channel_id, window_commanded, window_measured,
+                             ratio, ch._lifetime_stall_count))
+                        self._reset_stall_window(ch)
+                        self.reactor.register_callback(
+                            lambda et, c=ch: self._stall_handler(et, c))
         else:
-            ch._stall_counter = 0
             ch._startup_polls_remaining = 0
             ch._direction_just_changed = False
+            self._reset_stall_window(ch)
         self._prev_mm[ch.channel_id] = ch.state['feed_mm']
+
+    def _reset_stall_window(self, ch):
+        """Clear the rolling commanded/measured window and the commanded
+        baseline so the next eligible poll starts a fresh evaluation.  Called
+        on direction change, motor start, and motor-stop/no-filament so a
+        reversal or stop can never manufacture a fake shortfall.
+        """
+        ch._stall_window = []
+        ch._prev_commanded_pos = None
+        ch._prev_measured_pos = None
 
     def _runout_handler(self, eventtime, ch):
         self.gcode.respond_info(
@@ -527,11 +615,18 @@ class BmcuFeeder:
         self._exec_gcode(ch, ch.insert_gcode)
 
     def _stall_handler(self, eventtime, ch):
+        commanded = ch._stall_window_commanded
+        measured = ch._stall_window_measured
+        ratio = measured / commanded if commanded else 0.0
         self.gcode.respond_info(
-            "BMCU: blockage/stall on channel %d — running stall recovery" % ch.channel_id)
+            "BMCU: blockage/stall on channel %d — commanded %.2fmm but fed "
+            "only %.2fmm (%.0f%%)" %
+            (ch.channel_id, commanded, measured,
+             100.0 * measured / commanded if commanded else 0.0))
         self.gcode.respond_info(
-            "BMCU_EVENT event=stall channel=%d delta_mm=%.2f total_stalls=%d" %
-            (ch.channel_id, getattr(ch, '_last_stall_delta_mm', 0.0),
+            "BMCU_EVENT event=stall channel=%d commanded_mm=%.2f measured_mm=%.2f "
+            "ratio=%.2f total_stalls=%d" %
+            (ch.channel_id, commanded, measured, ratio,
              ch._lifetime_stall_count))
         self._exec_gcode(ch, ch.stall_gcode)
 
