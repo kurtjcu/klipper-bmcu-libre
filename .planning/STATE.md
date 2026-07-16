@@ -29,7 +29,7 @@ Phase: 10
 Plan: 01 complete
 Milestone: v1.2 Hardware Validation & V2.2 Compatibility
 Status: Phase 10 complete
-Last activity: 2026-07-07
+Last activity: 2026-07-16 - Completed quick task 260716-hn6: drift-aware stall detection
 
 ```
 v1.1 Progress: [██████████] 100% (2/2 phases) — SHIPPED
@@ -94,6 +94,13 @@ None yet.
 ### Blockers/Concerns
 
 None currently active.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260716-gto | Add console reporting when the print pauses (runout, stall, serial error) | 2026-07-16 | cdd1385 | [260716-gto-add-reporting-when-it-pauses-the-print-c](./quick/260716-gto-add-reporting-when-it-pauses-the-print-c/) |
+| 260716-hn6 | Drift-aware stall detection (commanded-vs-measured slip ratio) + fixed stall reporting | 2026-07-16 | 6992447 | [260716-hn6-drift-aware-bmcu-stall-detection-compare](./quick/260716-hn6-drift-aware-bmcu-stall-detection-compare/) |
 
 ## Session Continuity
 

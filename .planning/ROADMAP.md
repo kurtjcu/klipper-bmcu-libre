@@ -51,14 +51,13 @@ Plans:
 
 </details>
 
-### Phase 10: ENABLE Boot Timing
+<details>
+<summary>✅ Phase 10 (completed 2026-07-07)</summary>
 
-**Goal:** Replace blocking sleep with BOOT-message-driven handshake and ENABLE retry loop to reduce Klipper startup delay.
-**Plans:** 1 plan
+- [x] Phase 10: ENABLE Boot Timing — BOOT-driven handshake with 5s deadline + 3-attempt ENABLE retry replacing sleep(2)/sleep(5)
+  - [x] 10-01-PLAN.md — Rewrite connect() for BOOT wait + ENABLE retry, simplify _cmd_enable(), add 6 tests
 
-Plans:
-
-- [ ] 10-01-PLAN.md — Rewrite connect() for BOOT wait + ENABLE retry, simplify _cmd_enable(), add 6 tests
+</details>
 
 ### Phase 11: Print Test
 
@@ -76,5 +75,5 @@ Plans:
 | 6. Feed Distance Tracking | v1.2 | 2/2 | Complete    | 2026-07-07 |
 | 7. Direction Mapping | v1.2 | 1/1 | Complete    | 2026-07-07 |
 | 8. Filament Sensor Investigation | v1.2 | 0/0 | Complete | 2026-07-07 |
-| 10. ENABLE Boot Timing | v1.2 | 0/1 | Planned | — |
+| 10. ENABLE Boot Timing | v1.2 | 1/1 | Complete | 2026-07-07 |
 | 11. Print Test | v1.2 | 0/1 | Planned | — |
