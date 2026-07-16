@@ -147,6 +147,7 @@ class MockGcode:
         self._commands = {}
         self._mux_commands = {}
         self._scripts_run = []
+        self._responses = []
 
     def register_command(self, name, handler, desc=""):
         self._commands[name] = handler
@@ -156,6 +157,9 @@ class MockGcode:
 
     def run_script(self, script):
         self._scripts_run.append(script)
+
+    def respond_info(self, text):
+        self._responses.append(text)
 
 
 # ---------------------------------------------------------------------------
