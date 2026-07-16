@@ -139,6 +139,43 @@ class MockGcodeMacro:
 
 
 # ---------------------------------------------------------------------------
+# Mock mcu — provides estimated_print_time for the drift-aware stall detector
+# ---------------------------------------------------------------------------
+
+class MockMcu:
+    """Mock of Klipper's mcu object.  estimated_print_time(eventtime) normally
+    converts a reactor eventtime into an MCU print_time; tests can override
+    via _print_time_value to decouple from eventtime, defaulting to identity.
+    """
+    def __init__(self):
+        self._print_time_value = None  # None => identity (return eventtime)
+
+    def estimated_print_time(self, eventtime):
+        if self._print_time_value is not None:
+            return self._print_time_value
+        return eventtime
+
+
+# ---------------------------------------------------------------------------
+# Mock extruder — provides find_past_position for the drift-aware stall detector
+# ---------------------------------------------------------------------------
+
+class MockExtruder:
+    """Mock of Klipper's extruder (toolhead trapq) object.  Tests script the
+    commanded cumulative position returned by find_past_position via
+    next_position (fixed value) or a queue (sequential values, one per call).
+    """
+    def __init__(self, position=0.0):
+        self.next_position = position
+        self._position_queue = []
+
+    def find_past_position(self, print_time):
+        if self._position_queue:
+            return self._position_queue.pop(0)
+        return self.next_position
+
+
+# ---------------------------------------------------------------------------
 # Mock gcode
 # ---------------------------------------------------------------------------
 
@@ -174,6 +211,7 @@ class MockPrinter:
         # Pre-register standard objects
         self._objects['gcode'] = MockGcode()
         self._objects['gcode_macro'] = MockGcodeMacro()
+        self._objects['mcu'] = MockMcu()
 
     def get_reactor(self):
         return self._reactor
@@ -234,7 +272,7 @@ class MockConfig:
             raise ValueError("%s above maxval %s" % (key, maxval))
         return val
 
-    def getfloat(self, key, default=_SENTINEL, minval=None):
+    def getfloat(self, key, default=_SENTINEL, minval=None, maxval=None):
         if key in self._params:
             val = float(self._params[key])
         elif default is not _SENTINEL:
@@ -243,6 +281,8 @@ class MockConfig:
             raise KeyError("Missing config key: %s" % key)
         if minval is not None and val < minval:
             raise ValueError("%s below minval %s" % (key, minval))
+        if maxval is not None and val > maxval:
+            raise ValueError("%s above maxval %s" % (key, maxval))
         return val
 
     def getboolean(self, key, default=_SENTINEL):
