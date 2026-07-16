@@ -504,6 +504,7 @@ class BmcuFeeder:
                     ch.min_event_systime = self.reactor.NEVER
                     logging.info("BMCU ch%d: blockage detected (delta_mm=%.2f, total_stalls=%d)" %
                                  (ch.channel_id, delta, ch._lifetime_stall_count))
+                    ch._last_stall_delta_mm = delta
                     self.reactor.register_callback(
                         lambda et, c=ch: self._stall_handler(et, c))
         else:
