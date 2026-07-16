@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 
 from klippy.extras.bmcu_feeder import BmcuSerial
 from tests.conftest import (MockSerial, MockReactor, MockConfig, MockPrinter, MockGcmd,
-                             MockIdleTimeout, MockPauseResume)
+                             MockIdleTimeout, MockPauseResume, MockMcu, MockExtruder)
 
 
 # ===========================================================================
@@ -319,7 +319,9 @@ class TestBmcuChannel:
         assert ch.extruder == 'extruder'
         assert ch.event_delay == pytest.approx(3.0)
         assert ch.pause_on_runout is True
-        assert ch.stall_threshold_mm == pytest.approx(0.5)
+        assert ch.min_commanded_mm == pytest.approx(1.0)
+        assert ch.slip_ratio == pytest.approx(0.5)
+        assert ch.stall_window_polls == 3
         assert ch.sensor_enabled is True
 
     def test_channel_gcode_templates(self):
@@ -934,322 +936,362 @@ class TestBmcuEventDispatch:
 # ===========================================================================
 
 class TestBmcuStallDetection:
-    """Tests for blockage detection: feed_mm stall while motor running and filament present."""
+    """Tests for the drift-aware stall detector: windowed cumulative
+    commanded-vs-measured slip ratio, replacing the old absolute per-poll
+    delta/debounce model."""
 
-    def _make_feeder_with_channel(self, monkeypatch, stall_threshold_mm=0.5,
-                                   stall_debounce_count=1,
-                                   stall_startup_ignore_polls=0):
-        """Helper: build a connected BmcuFeeder with one stall-configured channel."""
+    def _make_feeder_with_channel(self, monkeypatch, min_commanded_mm=1.0,
+                                   slip_ratio=0.5,
+                                   stall_window_polls=3,
+                                   stall_startup_ignore_polls=0,
+                                   with_extruder=True):
+        """Helper: build a connected, ready BmcuFeeder with one stall-configured
+        channel. When with_extruder is True, a MockExtruder is registered as
+        'extruder' and channel 0 is configured to use it; _handle_ready is
+        called so _estimated_print_time and ch._extruder_obj are populated.
+        When False, the channel has no extruder configured at all (extruder-less
+        path), so stall detection is disabled after _handle_ready.
+        """
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
         cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
         feeder = BmcuFeeder(cfg)
 
         ch_params = {
-            'extruder': 'extruder',
             'runout_gcode': 'PAUSE',
             'insert_gcode': 'RESUME',
             'stall_gcode': 'M600',
-            'stall_threshold_mm': stall_threshold_mm,
-            'stall_debounce_count': stall_debounce_count,
+            'min_commanded_mm': min_commanded_mm,
+            'slip_ratio': slip_ratio,
+            'stall_window_polls': stall_window_polls,
             'stall_startup_ignore_polls': stall_startup_ignore_polls,
         }
+        if with_extruder:
+            ch_params['extruder'] = 'extruder'
         ch_cfg = MockConfig(ch_params, name='bmcu_channel 0')
         ch_cfg.printer = cfg.printer
         cfg.printer.add_object('bmcu_channel 0', BmcuChannel(ch_cfg))
         cfg.printer._objects['idle_timeout'] = MockIdleTimeout(state='Printing')
         cfg.printer._objects['pause_resume'] = MockPauseResume()
+        if with_extruder:
+            cfg.printer._objects['extruder'] = MockExtruder()
 
         monkeypatch.setattr(
             'klippy.extras.bmcu_feeder.serial.Serial',
             lambda: MockSerial()
         )
         feeder._handle_connect()
+        feeder._handle_ready()
+        # Timer callback itself isn't exercised by these tests; unregister
+        # so no dangling timer handle lingers across tests.
+        feeder.reactor.unregister_timer(feeder._poll_timer_handle)
+        # Prime filament_present=True directly (bypassing _check_events) so
+        # the first _poll() call below does not trigger an insert event —
+        # an insert event sets min_event_systime=NEVER, which would suppress
+        # all subsequent stall evaluation in the test.
+        ch = feeder._channels[0]
+        ch.state['filament_present'] = True
         return feeder
 
-    def test_blockage_detect(self, monkeypatch):
-        """When filament_present=True, motor_running=True, and feed_mm unchanged, stall fires."""
-        feeder = self._make_feeder_with_channel(monkeypatch)
+    def _poll(self, feeder, ch, commanded_pos, measured_mm,
+              filament_present=True, motor_running=True, direction='FWD'):
+        """Drive one poll: set the extruder's commanded position and the
+        channel's measured feed_mm, then call _check_events with the
+        previous state snapshotted beforehand."""
+        old_state = dict(ch.state)
+        extruder = ch._extruder_obj
+        if extruder is not None:
+            extruder.next_position = commanded_pos
+        ch.state.update({
+            'filament_present': filament_present,
+            'motor_running': motor_running,
+            'feed_mm': measured_mm,
+            'direction': direction,
+        })
+        feeder._check_events(ch, old_state)
+
+    def test_benign_steady_slip_no_stall(self, monkeypatch):
+        """(a) Commanded advances steadily; measured advances slightly less but
+        stays ABOVE commanded*slip_ratio every poll across the window — no stall."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5, stall_window_polls=3)
         reactor = feeder.reactor
         ch = feeder._channels[0]
 
-        # Set up: motor running, filament present, feed_mm = 10.0
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
-
-        # First call — establishes baseline in _prev_mm
-        old_state = dict(ch.state)
-        feeder._check_events(ch, old_state)
+        # Baseline poll — establishes _prev_commanded_pos / _prev_measured_pos.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
         reactor.callbacks.clear()
 
-        # Second call — same feed_mm (no motion), should trigger stall
-        old_state2 = dict(ch.state)
-        feeder._check_events(ch, old_state2)
+        # Steady slip: commanded advances 5mm/poll, measured advances 4mm/poll
+        # (80% fed — well above the 50% slip_ratio threshold).
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=4.0)
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=8.0)
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=12.0)
+        self._poll(feeder, ch, commanded_pos=20.0, measured_mm=16.0)
 
-        assert len(reactor.callbacks) == 1, "stall callback must be registered when feed_mm stalls"
+        assert len(reactor.callbacks) == 0, \
+            "benign steady-state slip above slip_ratio must not trip a stall"
 
-    def test_stall_gcode(self, monkeypatch):
-        """When blockage detected and stall_gcode configured, stall_gcode is rendered and run."""
-        feeder = self._make_feeder_with_channel(monkeypatch)
+    def test_transient_shortfall_recovers_no_stall(self, monkeypatch):
+        """(b) One poll's measured lags badly, then recovers within the window so
+        cumulative window_measured stays >= window_commanded*slip_ratio — no stall."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5, stall_window_polls=3)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        # Baseline poll.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
+        reactor.callbacks.clear()
+
+        # Poll 1: commanded advances 5mm, measured lags to 0mm (phase lag).
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0)
+        # Poll 2: commanded advances another 5mm, measured catches up hard —
+        # window (last 3 polls) now totals commanded=10, measured=10 (100%).
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=10.0)
+        # Poll 3: steady continuation — window stays well-fed.
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=15.0)
+
+        assert len(reactor.callbacks) == 0, \
+            "a transient one-poll shortfall that recovers within the window must not trip a stall"
+
+    def test_sustained_jam_fires_stall(self, monkeypatch):
+        """(c) Commanded keeps advancing >= min_commanded_mm across the window while
+        measured stays ~0 — exactly ONE stall fires with a commanded/measured/ratio report."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5, stall_window_polls=3)
         reactor = feeder.reactor
         ch = feeder._channels[0]
         gcode = feeder.gcode
 
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 5.0})
-
-        # First call — baseline
-        feeder._check_events(ch, dict(ch.state))
+        # Baseline poll.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
         reactor.callbacks.clear()
 
-        # Second call — no motion
-        feeder._check_events(ch, dict(ch.state))
-        assert len(reactor.callbacks) == 1, "stall callback must be registered"
-        reactor.callbacks[0](0.0)
-        assert len(gcode._scripts_run) == 1, "stall_gcode must be run"
-        assert 'M600' in gcode._scripts_run[0]
+        # Real jam: commanded advances every poll, measured never moves.
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0)
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0)
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=0.0)
 
-    def test_no_stall_without_filament(self, monkeypatch):
-        """When filament_present=False, no blockage event fires even if feed_mm is unchanged."""
-        feeder = self._make_feeder_with_channel(monkeypatch)
+        assert len(reactor.callbacks) == 1, \
+            "a sustained real jam must fire exactly one stall"
+
+        # Execute the fired callback and check the report format.
+        reactor.callbacks[0](0.0)
+        assert any('commanded_mm=' in r for r in gcode._responses)
+        assert any('measured_mm=' in r for r in gcode._responses)
+        assert any('ratio=' in r for r in gcode._responses)
+
+        # Further sustained-jam polls (window was reset on fire) do not
+        # immediately double-fire — min_event_systime suppresses until handled.
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=20.0, measured_mm=0.0)
+        assert len(reactor.callbacks) == 0, \
+            "min_event_systime suppression must prevent an immediate re-fire"
+
+    def test_retraction_no_stall(self, monkeypatch):
+        """(d) Commanded moves negative (retraction) or forward movement stays below
+        min_commanded_mm across the window — no stall, even with flat measured."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=5.0, slip_ratio=0.5, stall_window_polls=3)
         reactor = feeder.reactor
         ch = feeder._channels[0]
 
-        ch.state.update({'filament_present': False, 'motor_running': True, 'feed_mm': 3.0})
-
-        feeder._check_events(ch, dict(ch.state))
+        # Baseline poll.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
         reactor.callbacks.clear()
-        feeder._check_events(ch, dict(ch.state))
+
+        # Retraction: commanded position decreases (negative delta) — forward
+        # window contribution is clamped to 0, so window_commanded never
+        # reaches min_commanded_mm=5.0 no matter how flat measured stays.
+        self._poll(feeder, ch, commanded_pos=-2.0, measured_mm=0.0)
+        self._poll(feeder, ch, commanded_pos=-4.0, measured_mm=0.0)
+        self._poll(feeder, ch, commanded_pos=-6.0, measured_mm=0.0)
+
+        assert len(reactor.callbacks) == 0, \
+            "pure retraction/travel must not trip a stall"
+
+        # Small forward moves, individually and cumulatively still below
+        # min_commanded_mm=5.0 over the 3-poll window.
+        self._poll(feeder, ch, commanded_pos=-5.0, measured_mm=0.0)
+        self._poll(feeder, ch, commanded_pos=-4.0, measured_mm=0.0)
+        self._poll(feeder, ch, commanded_pos=-3.0, measured_mm=0.0)
+
+        assert len(reactor.callbacks) == 0, \
+            "forward movement below min_commanded_mm across the window must not trip a stall"
+
+    def test_extruderless_channel_skips_stall(self, monkeypatch):
+        """(e) A channel with no extruder configured disables stall detection
+        entirely after _handle_ready (with a one-time warning), while runout
+        still fires normally."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5, stall_window_polls=2,
+            with_extruder=False)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        assert ch._stall_enabled is False
+        assert ch._extruder_obj is None
+
+        # Jam-like scenario: motor running, filament present, measured flat.
+        # commanded polling would normally accumulate here, but with no
+        # extruder object the stall block must be skipped entirely (it must
+        # not attempt to call find_past_position on None).
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=10.0)
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=10.0)
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=10.0)
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=10.0)
+
+        assert len(reactor.callbacks) == 0, \
+            "extruder-less channel must never fire a stall"
+
+        # Runout still works: filament present -> absent while printing.
+        old_state = dict(ch.state)
+        old_state['filament_present'] = True
+        ch.state['filament_present'] = False
+        ch.min_event_systime = 0.0
+        feeder._check_events(ch, old_state)
+        assert len(reactor.callbacks) == 1, \
+            "runout must still fire for an extruder-less channel"
+
+    def test_one_time_warning_logged_for_extruderless_channel(self, monkeypatch, caplog):
+        """A channel with extruder=None logs exactly one warning at ready-time."""
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING):
+            feeder = self._make_feeder_with_channel(
+                monkeypatch, with_extruder=False)
+        warnings = [r for r in caplog.records if r.levelno == _logging.WARNING
+                    and 'ch0' in r.message and 'stall detection disabled' in r.message]
+        assert len(warnings) == 1, \
+            "extruder-less channel must log exactly one warning at ready-time"
+
+    def test_no_stall_without_filament(self, monkeypatch):
+        """When filament_present=False, no blockage event fires even with a jam-like pattern."""
+        feeder = self._make_feeder_with_channel(monkeypatch, stall_window_polls=2)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   filament_present=False)
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   filament_present=False)
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0,
+                   filament_present=False)
 
         assert len(reactor.callbacks) == 0, "no stall when filament absent"
 
     def test_no_stall_motor_stopped(self, monkeypatch):
-        """When motor_running=False, no blockage event fires even if feed_mm is unchanged."""
-        feeder = self._make_feeder_with_channel(monkeypatch)
+        """When motor_running=False, no blockage event fires even with a jam-like pattern."""
+        feeder = self._make_feeder_with_channel(monkeypatch, stall_window_polls=2)
         reactor = feeder.reactor
         ch = feeder._channels[0]
 
-        ch.state.update({'filament_present': True, 'motor_running': False, 'feed_mm': 3.0})
-
-        feeder._check_events(ch, dict(ch.state))
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
         reactor.callbacks.clear()
-        feeder._check_events(ch, dict(ch.state))
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0,
+                   motor_running=False)
 
         assert len(reactor.callbacks) == 0, "no stall when motor stopped"
 
-    def test_stall_threshold_configurable(self, monkeypatch):
-        """Channel with stall_threshold_mm=0.1 detects blockage at smaller delta than default 0.5."""
-        feeder = self._make_feeder_with_channel(monkeypatch, stall_threshold_mm=0.1)
-        reactor = feeder.reactor
-        ch = feeder._channels[0]
-
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 0.0})
-        feeder._check_events(ch, dict(ch.state))
-        reactor.callbacks.clear()
-
-        # Move 0.05 mm — below threshold of 0.1, should still stall
-        ch.state['feed_mm'] = 0.05
-        feeder._check_events(ch, dict(ch.state))
-
-        assert len(reactor.callbacks) == 1, "stall must detect delta < stall_threshold_mm=0.1"
-
-    # --- Phase 4: Stall hardening tests (STALL-01 through STALL-04) ---
-
-    def test_stall_no_fire_single_poll_with_debounce(self, monkeypatch):
-        """With stall_debounce_count=3, two consecutive zero-delta polls do NOT fire stall."""
-        feeder = self._make_feeder_with_channel(monkeypatch,
-                                                 stall_debounce_count=3,
-                                                 stall_startup_ignore_polls=0)
-        reactor = feeder.reactor
-        ch = feeder._channels[0]
-
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
-
-        # Call 1 — establishes baseline in _prev_mm
-        feeder._check_events(ch, dict(ch.state))
-        reactor.callbacks.clear()
-
-        # Call 2 — first sub-threshold (same feed_mm)
-        feeder._check_events(ch, dict(ch.state))
-        assert len(reactor.callbacks) == 0, "1 sub-threshold poll must not fire with debounce=3"
-
-        # Call 3 — second sub-threshold
-        feeder._check_events(ch, dict(ch.state))
-        assert len(reactor.callbacks) == 0, "2 sub-threshold polls must not fire with debounce=3"
-
-    def test_stall_fires_after_n_consecutive_polls(self, monkeypatch):
-        """With stall_debounce_count=3, 3 consecutive zero-delta polls fire exactly one stall."""
-        feeder = self._make_feeder_with_channel(monkeypatch,
-                                                 stall_debounce_count=3,
-                                                 stall_startup_ignore_polls=0)
-        reactor = feeder.reactor
-        ch = feeder._channels[0]
-
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
-
-        # Baseline call
-        feeder._check_events(ch, dict(ch.state))
-        reactor.callbacks.clear()
-
-        # 3 consecutive zero-delta polls
-        feeder._check_events(ch, dict(ch.state))
-        feeder._check_events(ch, dict(ch.state))
-        feeder._check_events(ch, dict(ch.state))
-
-        assert len(reactor.callbacks) == 1, "stall must fire after 3 consecutive sub-threshold polls"
-
-    def test_stall_counter_resets_on_motion(self, monkeypatch):
-        """With stall_debounce_count=3, motion resets counter so stall does not fire."""
-        feeder = self._make_feeder_with_channel(monkeypatch,
-                                                 stall_debounce_count=3,
-                                                 stall_startup_ignore_polls=0)
-        reactor = feeder.reactor
-        ch = feeder._channels[0]
-
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
-
-        # Baseline
-        feeder._check_events(ch, dict(ch.state))
-        reactor.callbacks.clear()
-
-        # 2 zero-delta polls (counter at 2)
-        feeder._check_events(ch, dict(ch.state))
-        feeder._check_events(ch, dict(ch.state))
-
-        # Motion detected (feed_mm increases past threshold)
-        ch.state['feed_mm'] = 12.0
-        feeder._check_events(ch, dict(ch.state))
-
-        # 2 more zero-delta polls (counter should be at 2, not 3+)
-        feeder._check_events(ch, dict(ch.state))
-        feeder._check_events(ch, dict(ch.state))
-
-        assert len(reactor.callbacks) == 0, "motion must reset stall counter"
-
     def test_startup_grace_window_suppresses_stall(self, monkeypatch):
-        """With stall_startup_ignore_polls=2 and debounce=1, first 2 polls after motor start suppressed."""
-        feeder = self._make_feeder_with_channel(monkeypatch,
-                                                 stall_debounce_count=1,
-                                                 stall_startup_ignore_polls=2)
+        """With stall_startup_ignore_polls=2, the first 2 polls after motor start
+        are consumed by the grace window (and reset the accumulation window),
+        so a jam pattern only starts accumulating after grace expires."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
+            stall_window_polls=2, stall_startup_ignore_polls=2)
         reactor = feeder.reactor
         ch = feeder._channels[0]
 
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
-
-        # Motor start transition (old motor_running=False -> new=True)
+        # Motor start transition (old motor_running=False -> new=True).
         old_state = dict(ch.state)
         old_state['motor_running'] = False
+        ch._extruder_obj.next_position = 0.0
+        ch.state.update({'filament_present': True, 'motor_running': True,
+                          'feed_mm': 0.0, 'direction': 'FWD'})
         feeder._check_events(ch, old_state)
         reactor.callbacks.clear()
 
-        # Grace poll 1 — should NOT fire
-        feeder._check_events(ch, dict(ch.state))
+        # Grace poll 1 — consumed by grace, window reset, no evaluation.
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0)
         assert len(reactor.callbacks) == 0, "grace poll 1 must suppress stall"
 
-        # Grace poll 2 — should NOT fire
-        feeder._check_events(ch, dict(ch.state))
+        # Grace poll 2 — also consumed by grace.
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0)
         assert len(reactor.callbacks) == 0, "grace poll 2 must suppress stall"
 
-        # Grace expired, debounce_count=1 — should fire
-        feeder._check_events(ch, dict(ch.state))
-        assert len(reactor.callbacks) == 1, "stall must fire after grace window expires"
+        # Grace expired: this poll becomes the fresh baseline (first sample).
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=0.0)
+        assert len(reactor.callbacks) == 0, "post-grace baseline poll must not fire yet"
 
-    def test_startup_grace_resets_on_motor_restart(self, monkeypatch):
-        """When motor stops and restarts, grace window resets to full count."""
-        feeder = self._make_feeder_with_channel(monkeypatch,
-                                                 stall_debounce_count=1,
-                                                 stall_startup_ignore_polls=2)
+        # One more jam poll completes the 2-poll window with the gap sustained.
+        self._poll(feeder, ch, commanded_pos=20.0, measured_mm=0.0)
+        assert len(reactor.callbacks) == 1, \
+            "stall must fire once the window fills after the grace window expires"
+
+    def test_direction_change_resets_window(self, monkeypatch):
+        """Direction change clears the rolling window and commanded baseline so
+        a reversal cannot manufacture a fake shortfall."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5, stall_window_polls=2)
         reactor = feeder.reactor
         ch = feeder._channels[0]
 
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
-
-        # Motor start
-        old_start = dict(ch.state)
-        old_start['motor_running'] = False
-        feeder._check_events(ch, old_start)
-
-        # 1 grace poll
-        feeder._check_events(ch, dict(ch.state))
-
-        # Motor stops
-        ch.state['motor_running'] = False
-        feeder._check_events(ch, {'filament_present': True, 'motor_running': True,
-                                   'feed_mm': 10.0, 'direction': 'FWD'})
-
-        # Motor starts again — this call sets grace=2, then enters stall block
-        # which decrements grace to 1 (consuming one grace poll)
-        ch.state['motor_running'] = True
-        old_restart = dict(ch.state)
-        old_restart['motor_running'] = False
-        feeder._check_events(ch, old_restart)
+        # Baseline.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
         reactor.callbacks.clear()
 
-        # 1 more grace poll — grace decrements to 0
-        feeder._check_events(ch, dict(ch.state))
-        assert len(reactor.callbacks) == 0, "grace window must reset on motor restart"
+        # One jam-like poll partially fills the window.
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0)
 
-        # Next poll — grace expired, debounce_count=1, fires
-        feeder._check_events(ch, dict(ch.state))
-        assert len(reactor.callbacks) == 1, "stall must fire after reset grace window expires"
-
-    def test_direction_change_resets_prev_mm(self, monkeypatch):
-        """Direction change sets _direction_just_changed flag; stall skips that poll."""
-        feeder = self._make_feeder_with_channel(monkeypatch,
-                                                 stall_debounce_count=1,
-                                                 stall_startup_ignore_polls=0)
-        reactor = feeder.reactor
-        ch = feeder._channels[0]
-
-        ch.state.update({'filament_present': True, 'motor_running': True,
-                         'feed_mm': 10.0, 'direction': 'FWD'})
-
-        # Baseline
-        feeder._check_events(ch, dict(ch.state))
-        reactor.callbacks.clear()
-
-        # Direction change: FWD -> REV
+        # Direction change: FWD -> REV. This must reset the window/baseline
+        # and must not itself fire a stall.
         old_state = dict(ch.state)
         ch.state['direction'] = 'REV'
         feeder._check_events(ch, old_state)
         assert len(reactor.callbacks) == 0, \
-            "direction change poll must NOT fire stall (flag suppresses counter)"
+            "direction-change poll must not fire a stall"
 
-        # Next poll — no direction change, same feed_mm, counter increments to 1
-        feeder._check_events(ch, dict(ch.state))
-        assert len(reactor.callbacks) == 1, \
-            "first real post-direction-change sub-threshold poll must fire stall"
+        # Post-reset baseline poll — window was cleared, so this just
+        # establishes a fresh commanded baseline (no evaluation yet).
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0, direction='REV')
+        assert len(reactor.callbacks) == 0, \
+            "first poll after direction-change reset must only set a fresh baseline"
 
     def test_stall_counter_resets_when_motor_stops(self, monkeypatch):
-        """Stall counter does not carry across motor stop/start cycles."""
-        feeder = self._make_feeder_with_channel(monkeypatch,
-                                                 stall_debounce_count=3,
-                                                 stall_startup_ignore_polls=0)
+        """The rolling window does not carry across motor stop/start cycles."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5, stall_window_polls=2)
         reactor = feeder.reactor
         ch = feeder._channels[0]
 
-        ch.state.update({'filament_present': True, 'motor_running': True, 'feed_mm': 10.0})
-
-        # Baseline
-        feeder._check_events(ch, dict(ch.state))
+        # Baseline.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
         reactor.callbacks.clear()
 
-        # 2 zero-delta polls (counter at 2)
-        feeder._check_events(ch, dict(ch.state))
-        feeder._check_events(ch, dict(ch.state))
+        # One jam-like poll partially fills the window.
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0)
 
-        # Motor stops — counter must reset
+        # Motor stops — window must reset.
         old_running = dict(ch.state)
         ch.state['motor_running'] = False
         feeder._check_events(ch, old_running)
 
-        # Motor starts again
+        # Motor starts again — this resets startup grace (0 here) and window.
         old_stopped = dict(ch.state)
         ch.state['motor_running'] = True
         feeder._check_events(ch, old_stopped)
+        reactor.callbacks.clear()
 
-        # 1 zero-delta poll — counter should be 1, not 3
-        feeder._check_events(ch, dict(ch.state))
+        # First poll after restart only sets a fresh baseline.
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0)
         assert len(reactor.callbacks) == 0, \
-            "stall counter must not carry across motor stop/start"
+            "stall window must not carry across motor stop/start"
 
 
 # ===========================================================================
@@ -1436,10 +1478,12 @@ class TestBmcuDiagnostics:
     """Tests for Phase 5 feed diagnostics: DIAG-01, DIAG-02, DIAG-03."""
 
     def _make_feeder_with_channel(self, monkeypatch, ch_ids=(0,),
-                                   stall_threshold_mm=0.5,
-                                   stall_debounce_count=1,
+                                   min_commanded_mm=1.0,
+                                   slip_ratio=0.5,
+                                   stall_window_polls=3,
                                    stall_startup_ignore_polls=0):
-        """Helper: build a connected BmcuFeeder with diagnostics-ready channels."""
+        """Helper: build a connected, ready BmcuFeeder with diagnostics-ready
+        channels, each with a MockExtruder so stall detection is active."""
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
         cfg = MockConfig({'serial': _VALID_SERIAL}, name='bmcu_feeder')
@@ -1451,8 +1495,9 @@ class TestBmcuDiagnostics:
                 'runout_gcode': 'PAUSE',
                 'insert_gcode': 'RESUME',
                 'stall_gcode': 'M600',
-                'stall_threshold_mm': stall_threshold_mm,
-                'stall_debounce_count': stall_debounce_count,
+                'min_commanded_mm': min_commanded_mm,
+                'slip_ratio': slip_ratio,
+                'stall_window_polls': stall_window_polls,
                 'stall_startup_ignore_polls': stall_startup_ignore_polls,
             }
             ch_cfg = MockConfig(ch_params, name='bmcu_channel %d' % ch_id)
@@ -1460,12 +1505,15 @@ class TestBmcuDiagnostics:
             cfg.printer.add_object('bmcu_channel %d' % ch_id, BmcuChannel(ch_cfg))
         cfg.printer._objects['idle_timeout'] = MockIdleTimeout(state='Printing')
         cfg.printer._objects['pause_resume'] = MockPauseResume()
+        cfg.printer._objects['extruder'] = MockExtruder()
 
         monkeypatch.setattr(
             'klippy.extras.bmcu_feeder.serial.Serial',
             lambda: MockSerial()
         )
         feeder._handle_connect()
+        feeder._handle_ready()
+        feeder.reactor.unregister_timer(feeder._poll_timer_handle)
         return feeder
 
     def _dispatch(self, feeder, ch_id, feed_mm, fil=1, mot=1, spd=50,
@@ -1519,14 +1567,22 @@ class TestBmcuDiagnostics:
     def test_reset_feed_resets_stall_count(self, monkeypatch):
         """BMCU_RESET_FEED zeros _lifetime_stall_count."""
         feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,),
-                                                 stall_debounce_count=1,
+                                                 min_commanded_mm=1.0,
+                                                 slip_ratio=0.5,
+                                                 stall_window_polls=2,
                                                  stall_startup_ignore_polls=0)
         ch = feeder._channels[0]
+        extruder = feeder.printer.lookup_object('extruder')
         # Initialize with first poll (insert event fires, clears min_event_systime)
+        extruder.next_position = 0.0
         self._dispatch(feeder, 0, 10.0)
         feeder.reactor.callbacks.clear()
         ch.min_event_systime = 0.0  # reset event suppression from insert
-        # Trigger stall: zero delta with debounce_count=1
+        # Sustained jam: commanded keeps advancing, measured stays flat —
+        # window_polls=2 means the second such poll fires.
+        extruder.next_position = 5.0
+        self._dispatch(feeder, 0, 10.0)
+        extruder.next_position = 10.0
         self._dispatch(feeder, 0, 10.0)
         assert ch._lifetime_stall_count == 1
         # Reset
@@ -1565,16 +1621,23 @@ class TestBmcuDiagnostics:
         assert feeder.get_status(0.0)['channels']['0']['stall_count'] == 0
 
     def test_stall_count_increments_on_stall_fire(self, monkeypatch):
-        """stall_count increments when debounced stall fires."""
+        """stall_count increments when the windowed cumulative slip fires."""
         feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,),
-                                                 stall_debounce_count=1,
+                                                 min_commanded_mm=1.0,
+                                                 slip_ratio=0.5,
+                                                 stall_window_polls=2,
                                                  stall_startup_ignore_polls=0)
         ch = feeder._channels[0]
+        extruder = feeder.printer.lookup_object('extruder')
         # First poll: baseline (insert event fires, sets min_event_systime=NEVER)
+        extruder.next_position = 0.0
         self._dispatch(feeder, 0, 10.0)
         feeder.reactor.callbacks.clear()
         ch.min_event_systime = 0.0  # reset event suppression from insert
-        # Zero delta: stall fires (debounce_count=1)
+        # Sustained jam: commanded advances, measured (feed_mm) stays flat.
+        extruder.next_position = 5.0
+        self._dispatch(feeder, 0, 10.0)
+        extruder.next_position = 10.0
         self._dispatch(feeder, 0, 10.0)
         assert len(feeder.reactor.callbacks) >= 1
         assert feeder.get_status(0.0)['channels']['0']['stall_count'] == 1
