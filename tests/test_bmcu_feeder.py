@@ -944,13 +944,19 @@ class TestBmcuStallDetection:
                                    slip_ratio=0.5,
                                    stall_window_polls=3,
                                    stall_startup_ignore_polls=0,
-                                   with_extruder=True):
+                                   with_extruder=True,
+                                   require_motor_running=None,
+                                   pause_on_stall=None):
         """Helper: build a connected, ready BmcuFeeder with one stall-configured
         channel. When with_extruder is True, a MockExtruder is registered as
         'extruder' and channel 0 is configured to use it; _handle_ready is
         called so _estimated_print_time and ch._extruder_obj are populated.
         When False, the channel has no extruder configured at all (extruder-less
         path), so stall detection is disabled after _handle_ready.
+
+        require_motor_running and pause_on_stall default to None and are
+        only injected into ch_params when not None, so the module defaults
+        (both True) stay exercisable by simply not passing them.
         """
         from klippy.extras.bmcu_feeder import BmcuFeeder, BmcuChannel
 
@@ -966,6 +972,10 @@ class TestBmcuStallDetection:
             'stall_window_polls': stall_window_polls,
             'stall_startup_ignore_polls': stall_startup_ignore_polls,
         }
+        if require_motor_running is not None:
+            ch_params['require_motor_running'] = require_motor_running
+        if pause_on_stall is not None:
+            ch_params['pause_on_stall'] = pause_on_stall
         if with_extruder:
             ch_params['extruder'] = 'extruder'
         ch_cfg = MockConfig(ch_params, name='bmcu_channel 0')
@@ -1292,6 +1302,134 @@ class TestBmcuStallDetection:
         self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0)
         assert len(reactor.callbacks) == 0, \
             "stall window must not carry across motor stop/start"
+
+    def test_channel_config_defaults_require_motor_running_and_pause_on_stall(
+            self, monkeypatch):
+        """With neither key present in the config section, require_motor_running
+        and pause_on_stall both default True."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        ch = feeder._channels[0]
+        assert ch.require_motor_running is True
+        assert ch.pause_on_stall is True
+
+    def test_passive_channel_sustained_jam_fires_stall(self, monkeypatch):
+        """A channel with require_motor_running False, filament present, and
+        motor_running False for every poll fires exactly one stall once the
+        window fills — the entire point of the fix. The window itself is
+        non-empty after an ordinary (non-final) poll, proving the trailing
+        else is not wiping it every poll (the regression this test guards
+        against)."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
+            stall_window_polls=3, require_motor_running=False)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        # Baseline poll, motor stopped throughout.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
+        reactor.callbacks.clear()
+
+        # Real jam: commanded advances every poll, measured never moves,
+        # motor never runs (passive encoder — toolhead extruder pulls).
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(ch._stall_window) > 0, \
+            "stall window must accumulate on a passive channel poll, not " \
+            "be wiped by the trailing else"
+
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=0.0,
+                   motor_running=False)
+
+        assert len(reactor.callbacks) == 1, \
+            "a sustained jam on a passive (motor-never-running) channel " \
+            "must fire exactly one stall"
+
+    def test_default_require_motor_running_blocks_passive_stall(self, monkeypatch):
+        """A channel left at the default require_motor_running (True) with
+        motor_running False never evaluates a stall — behaviourally
+        identical to HEAD. This duplicates test_no_stall_motor_stopped's
+        intent explicitly under the require_motor_running name."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
+            stall_window_polls=2)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        assert ch.require_motor_running is True
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0,
+                   motor_running=False)
+
+        assert len(reactor.callbacks) == 0, \
+            "default require_motor_running must keep the motor-stopped gate"
+
+    def test_pause_on_stall_default_pauses_before_gcode(self, monkeypatch):
+        """When a stall fires with pause_on_stall at its default (True),
+        send_pause_command() is called and the stall_gcode template still
+        executes."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
+            stall_window_polls=3, require_motor_running=False)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        gcode = feeder.gcode
+        pause_resume = feeder.printer.lookup_object('pause_resume')
+        assert ch.pause_on_stall is True
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(reactor.callbacks) == 1
+
+        reactor.callbacks[0](0.0)
+        assert pause_resume.pause_called is True, \
+            "pause_resume.send_pause_command() must be called on stall"
+        assert any('M600' in s for s in gcode._scripts_run), \
+            "stall_gcode template must still execute when pause_on_stall is True"
+
+    def test_pause_on_stall_false_skips_pause_but_still_runs_gcode(self, monkeypatch):
+        """With pause_on_stall False, send_pause_command() is NOT called but
+        the stall_gcode template still executes."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
+            stall_window_polls=3, require_motor_running=False,
+            pause_on_stall=False)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        gcode = feeder.gcode
+        pause_resume = feeder.printer.lookup_object('pause_resume')
+        assert ch.pause_on_stall is False
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(reactor.callbacks) == 1
+
+        reactor.callbacks[0](0.0)
+        assert pause_resume.pause_called is False, \
+            "pause_resume.send_pause_command() must NOT be called when " \
+            "pause_on_stall is False"
+        assert any('M600' in s for s in gcode._scripts_run), \
+            "stall_gcode template must still execute when pause_on_stall is False"
 
 
 # ===========================================================================
