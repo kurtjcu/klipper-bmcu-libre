@@ -602,6 +602,16 @@ class TestDirectionInvert:
         monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial',
                             mock_serial_cls)
         feeder._handle_connect()
+        # _handle_ready resolves ch._extruder_obj / ch._stall_enabled and
+        # sets _estimated_print_time, matching real Klipper startup order
+        # (the poll timer that drives _check_events is only ever registered
+        # after _handle_ready). No 'extruder' object is registered here, so
+        # this cleanly disables stall detection for these channels via the
+        # existing extruder-lookup-failure path rather than leaving
+        # _stall_enabled/_extruder_obj in the inconsistent __init__-only
+        # state these direction-only tests don't exercise.
+        feeder._handle_ready()
+        feeder.reactor.unregister_timer(feeder._poll_timer_handle)
         for ms in serial_instances:
             ms._written = b""
         return feeder, serial_instances
@@ -701,6 +711,16 @@ class TestBmcuPolling:
 
         monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
         feeder._handle_connect()
+        # _handle_ready resolves ch._extruder_obj / ch._stall_enabled and
+        # sets _estimated_print_time, matching real Klipper startup order
+        # (the poll timer that drives _check_events is only ever registered
+        # after _handle_ready). No 'extruder' object is registered here, so
+        # this cleanly disables stall detection for these channels via the
+        # existing extruder-lookup-failure path rather than leaving
+        # _stall_enabled/_extruder_obj in the inconsistent __init__-only
+        # state these polling-dispatch tests don't exercise.
+        feeder._handle_ready()
+        feeder.reactor.unregister_timer(feeder._poll_timer_handle)
         return feeder, serial_instances
 
     def test_poll_sends_status(self, monkeypatch):
@@ -1209,16 +1229,24 @@ class TestBmcuStallDetection:
         assert len(reactor.callbacks) == 0, "no stall when motor stopped"
 
     def test_startup_grace_window_suppresses_stall(self, monkeypatch):
-        """With stall_startup_ignore_polls=2, the first 2 polls after motor start
-        are consumed by the grace window (and reset the accumulation window),
-        so a jam pattern only starts accumulating after grace expires."""
+        """With stall_startup_ignore_polls=2, the first 2 polls after motor
+        start are consumed by the grace window. Each grace poll takes its
+        baseline directly from that poll's own positions (_take_stall_baseline)
+        rather than resetting to None and waiting for a following poll to
+        re-establish it, so no extra baseline-only poll is spent once grace
+        expires — the jam pattern starts accumulating on the very next poll.
+        The measured blind window from arming to firing is exactly
+        stall_startup_ignore_polls + stall_window_polls polls."""
         feeder = self._make_feeder_with_channel(
             monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
             stall_window_polls=2, stall_startup_ignore_polls=2)
         reactor = feeder.reactor
         ch = feeder._channels[0]
 
-        # Motor start transition (old motor_running=False -> new=True).
+        # Motor start transition (old motor_running=False -> new=True) is
+        # itself the first poll after arming: it consumes the first grace
+        # poll and takes its baseline from THIS poll's own positions (0.0,
+        # 0.0).
         old_state = dict(ch.state)
         old_state['motor_running'] = False
         ch._extruder_obj.next_position = 0.0
@@ -1226,23 +1254,35 @@ class TestBmcuStallDetection:
                           'feed_mm': 0.0, 'direction': 'FWD'})
         feeder._check_events(ch, old_state)
         reactor.callbacks.clear()
+        polls_since_arm = 1
+        assert ch._startup_polls_remaining == 1, \
+            "the arming poll itself must consume the first grace poll"
 
-        # Grace poll 1 — consumed by grace, window reset, no evaluation.
+        # Second and last grace poll — startup_polls_remaining 1 -> 0,
+        # baseline re-taken from this poll's own positions. No window entry
+        # yet.
         self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0)
-        assert len(reactor.callbacks) == 0, "grace poll 1 must suppress stall"
+        polls_since_arm += 1
+        assert len(reactor.callbacks) == 0, "grace poll must suppress stall"
+        assert ch._startup_polls_remaining == 0
 
-        # Grace poll 2 — also consumed by grace.
+        # Grace has expired: this poll evaluates immediately against the
+        # baseline taken on the previous (grace) poll — one window entry,
+        # not yet full.
         self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0)
-        assert len(reactor.callbacks) == 0, "grace poll 2 must suppress stall"
+        polls_since_arm += 1
+        assert len(reactor.callbacks) == 0, \
+            "window must not be full immediately after grace expires"
 
-        # Grace expired: this poll becomes the fresh baseline (first sample).
+        # One more jam poll completes the 2-poll window with the gap
+        # sustained.
         self._poll(feeder, ch, commanded_pos=15.0, measured_mm=0.0)
-        assert len(reactor.callbacks) == 0, "post-grace baseline poll must not fire yet"
-
-        # One more jam poll completes the 2-poll window with the gap sustained.
-        self._poll(feeder, ch, commanded_pos=20.0, measured_mm=0.0)
+        polls_since_arm += 1
         assert len(reactor.callbacks) == 1, \
-            "stall must fire once the window fills after the grace window expires"
+            "stall must fire once the window fills after the grace expires"
+        assert polls_since_arm == ch.stall_startup_ignore_polls + ch.stall_window_polls, \
+            "the measured blind window must equal exactly " \
+            "stall_startup_ignore_polls + stall_window_polls polls"
 
     def test_direction_change_resets_window(self, monkeypatch):
         """Direction change clears the rolling window and commanded baseline so
@@ -1259,19 +1299,21 @@ class TestBmcuStallDetection:
         # One jam-like poll partially fills the window.
         self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0)
 
-        # Direction change: FWD -> REV. This must reset the window/baseline
-        # and must not itself fire a stall.
+        # Direction change: FWD -> REV. This must reset the window and take
+        # a fresh baseline directly from this poll's post-reversal positions
+        # (_take_stall_baseline) and must not itself fire a stall.
         old_state = dict(ch.state)
         ch.state['direction'] = 'REV'
         feeder._check_events(ch, old_state)
         assert len(reactor.callbacks) == 0, \
             "direction-change poll must not fire a stall"
 
-        # Post-reset baseline poll — window was cleared, so this just
-        # establishes a fresh commanded baseline (no evaluation yet).
+        # Next poll evaluates against the baseline taken on the reversal
+        # poll itself — a real (zero, since positions are unchanged) delta,
+        # not a second baseline-only poll.
         self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0, direction='REV')
         assert len(reactor.callbacks) == 0, \
-            "first poll after direction-change reset must only set a fresh baseline"
+            "one window entry after a direction-change reset must not fire yet"
 
     def test_stall_counter_resets_when_motor_stops(self, monkeypatch):
         """The rolling window does not carry across motor stop/start cycles."""
@@ -1430,6 +1472,162 @@ class TestBmcuStallDetection:
             "pause_on_stall is False"
         assert any('M600' in s for s in gcode._scripts_run), \
             "stall_gcode template must still execute when pause_on_stall is False"
+
+    def test_passive_channel_startup_grace_suppresses_first_two_eligible_polls(
+            self, monkeypatch):
+        """A passive channel (require_motor_running False) with
+        stall_startup_ignore_polls=2 that never sees a motor edge still
+        gets a startup grace: it is armed by the not-eligible -> eligible
+        transition at channel priming, and the first two eligible polls are
+        suppressed before a sustained jam fires once the window fills."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
+            stall_window_polls=2, stall_startup_ignore_polls=2,
+            require_motor_running=False)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        # First eligible poll arms the grace (not-eligible -> eligible,
+        # since this is the first _check_events call on the primed
+        # channel) and immediately consumes the first grace poll.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
+        reactor.callbacks.clear()
+        assert ch._startup_polls_remaining == 1
+
+        # Second grace poll.
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(reactor.callbacks) == 0, "grace poll must suppress stall"
+        assert ch._startup_polls_remaining == 0
+
+        # Grace expired: window fills over the following polls, motor
+        # never running.
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(reactor.callbacks) == 0, \
+            "window not yet full immediately after grace expires"
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(reactor.callbacks) == 1, \
+            "sustained jam must fire once the window fills on a passive channel"
+
+    def test_passive_channel_retraction_no_stall(self, monkeypatch):
+        """Passive channel, pure retraction / sub-threshold forward
+        movement: no stall, because window_commanded stays below
+        min_commanded_mm even with measured flat and the motor never
+        running."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=5.0, slip_ratio=0.5,
+            stall_window_polls=3, require_motor_running=False)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        # Baseline poll, motor stopped throughout.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
+        reactor.callbacks.clear()
+
+        # Retraction: commanded position decreases -- forward window
+        # contribution is clamped to 0, never reaches min_commanded_mm=5.0.
+        self._poll(feeder, ch, commanded_pos=-2.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=-4.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=-6.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(reactor.callbacks) == 0, \
+            "pure retraction on a passive channel must not trip a stall"
+
+        # Sub-threshold forward movement, individually and cumulatively
+        # still below min_commanded_mm=5.0 over the 3-poll window.
+        self._poll(feeder, ch, commanded_pos=-5.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=-4.0, measured_mm=0.0,
+                   motor_running=False)
+        self._poll(feeder, ch, commanded_pos=-3.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(reactor.callbacks) == 0, \
+            "sub-threshold forward movement on a passive channel must " \
+            "not trip a stall"
+
+    def test_passive_channel_direction_change_resets_window(self, monkeypatch):
+        """Passive channel, direction flips FWD to REV: the direction-change
+        poll itself does not fire, and the following poll starts from the
+        fresh baseline taken on that reversal poll."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
+            stall_window_polls=2, require_motor_running=False)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
+        reactor.callbacks.clear()
+
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   motor_running=False)
+
+        old_state = dict(ch.state)
+        ch.state['direction'] = 'REV'
+        feeder._check_events(ch, old_state)
+        assert len(reactor.callbacks) == 0, \
+            "direction-change poll on a passive channel must not fire a stall"
+
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   direction='REV', motor_running=False)
+        assert len(reactor.callbacks) == 0, \
+            "one window entry after a passive direction-change reset " \
+            "must not fire yet"
+
+    def test_sensor_disable_mid_jam_clears_window_reenable_rearms_grace(
+            self, monkeypatch):
+        """Setting ch.sensor_enabled = False mid-jam empties
+        ch._stall_window on the next poll; re-enabling re-arms
+        _startup_polls_remaining to stall_startup_ignore_polls."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=1.0, slip_ratio=0.5,
+            stall_window_polls=3, stall_startup_ignore_polls=2,
+            require_motor_running=False)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        # Arming poll (not-eligible -> eligible) also consumes the first
+        # grace poll.
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0,
+                   motor_running=False)
+        reactor.callbacks.clear()
+        assert ch._startup_polls_remaining == 1
+
+        # Second grace poll -- grace expires.
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0,
+                   motor_running=False)
+        assert ch._startup_polls_remaining == 0
+
+        # Mid-jam: one real window entry.
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(ch._stall_window) == 1
+
+        # Disable the sensor administratively -- the next poll must empty
+        # the window, since eligibility becomes False purely from
+        # sensor_enabled (the passive-mode equivalent of the motor-stop
+        # reset).
+        ch.sensor_enabled = False
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=0.0,
+                   motor_running=False)
+        assert len(ch._stall_window) == 0, \
+            "disabling the sensor mid-jam must empty the stall window"
+
+        # Re-enable -- the next poll is a not-eligible -> eligible
+        # transition, which re-arms the startup grace (and immediately
+        # consumes its first poll, like any other arming poll).
+        ch.sensor_enabled = True
+        self._poll(feeder, ch, commanded_pos=20.0, measured_mm=0.0,
+                   motor_running=False)
+        assert ch._startup_polls_remaining == ch.stall_startup_ignore_polls - 1, \
+            "re-enabling the sensor must re-arm startup_polls_remaining " \
+            "to stall_startup_ignore_polls"
 
 
 # ===========================================================================
@@ -1834,6 +2032,16 @@ class TestFeedAccumulation:
 
         monkeypatch.setattr('klippy.extras.bmcu_feeder.serial.Serial', mock_serial_cls)
         feeder._handle_connect()
+        # _handle_ready resolves ch._extruder_obj / ch._stall_enabled and
+        # sets _estimated_print_time, matching real Klipper startup order
+        # (the poll timer that drives _check_events is only ever registered
+        # after _handle_ready). No 'extruder' object is registered here, so
+        # this cleanly disables stall detection for these channels via the
+        # existing extruder-lookup-failure path rather than leaving
+        # _stall_enabled/_extruder_obj in the inconsistent __init__-only
+        # state these feed-accumulation tests don't exercise.
+        feeder._handle_ready()
+        feeder.reactor.unregister_timer(feeder._poll_timer_handle)
         return feeder, serial_instances
 
     def _dispatch(self, feeder, ch_id, feed_mm, fil=1, mot=1, spd=50,

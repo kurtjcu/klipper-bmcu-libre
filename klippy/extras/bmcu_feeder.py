@@ -558,6 +558,13 @@ class BmcuFeeder:
         ch._stall_eligible_prev = stall_eligible
 
         # --- Direction-change detection: reset _prev_mm and set suppression flag ---
+        # With the motor idle (require_motor_running False), direction
+        # transitions are driven purely by encoder movement and can be
+        # noisier than a commanded motor reversal, so a passive channel may
+        # reset its window more often than an active one. That is fail-safe
+        # (a reset can only delay a stall, never manufacture one) but a
+        # passive channel that chatters between FWD and REV will detect a
+        # jam more slowly. Documented tradeoff, no code change here.
         old_dir = old_state.get('direction', 'FWD')
         new_dir = ch.state['direction']
         if old_dir != new_dir:
@@ -583,18 +590,28 @@ class BmcuFeeder:
             # disabled entirely for this channel. Runout/insert are unaffected.
             pass
         elif stall_eligible:
+            # Hoisted once for the whole arm: ch._stall_enabled is already
+            # known true here, so ch._extruder_obj is not None.
+            now_print_time = self._estimated_print_time(now)
+            commanded_pos = ch._extruder_obj.find_past_position(now_print_time)
+            measured_pos = ch.state['feed_mm']
             if ch._direction_just_changed:
-                # Skip evaluation on the direction-change poll itself; take a
-                # fresh baseline next poll so a reversal can't manufacture a
-                # fake shortfall.
+                # The poll that spans a reversal is exactly the sample to
+                # discard: take the baseline directly from THIS poll's
+                # post-reversal positions rather than resetting to None and
+                # waiting for next poll to re-establish it — that discards
+                # the reversal delta while starting fresh immediately, with
+                # no extra baseline-only poll spent.
                 ch._direction_just_changed = False
+                self._take_stall_baseline(ch, commanded_pos, measured_pos)
             elif ch._startup_polls_remaining > 0:
+                # Same reasoning as the direction-change branch above: take
+                # the baseline from this (still-suppressed) poll's own
+                # positions so the startup grace doesn't cost an extra
+                # baseline-only poll once it expires.
                 ch._startup_polls_remaining -= 1
-                self._reset_stall_window(ch)
+                self._take_stall_baseline(ch, commanded_pos, measured_pos)
             else:
-                now_print_time = self._estimated_print_time(now)
-                commanded_pos = ch._extruder_obj.find_past_position(now_print_time)
-                measured_pos = ch.state['feed_mm']
                 if ch._prev_commanded_pos is None:
                     # First sample after a reset — need a delta before we can
                     # evaluate anything.
@@ -642,13 +659,30 @@ class BmcuFeeder:
 
     def _reset_stall_window(self, ch):
         """Clear the rolling commanded/measured window and the commanded
-        baseline so the next eligible poll starts a fresh evaluation.  Called
-        on direction change, motor start, and motor-stop/no-filament so a
-        reversal or stop can never manufacture a fake shortfall.
+        baseline, leaving the baseline to be re-established from scratch on
+        the next eligible poll.  Used where the current sample is itself
+        untrustworthy or unavailable: the not-eligible-to-eligible
+        transition (the extruder object / a real baseline may not exist
+        yet), the trailing ineligible else, and the post-fire reset.  See
+        _take_stall_baseline for the direction-change and startup-grace
+        cases, where the current sample IS trustworthy and reset would cost
+        an extra baseline-only poll.
         """
         ch._stall_window = []
         ch._prev_commanded_pos = None
         ch._prev_measured_pos = None
+
+    def _take_stall_baseline(self, ch, commanded_pos, measured_pos):
+        """Empty the rolling window and set the commanded/measured baseline
+        directly from the CURRENT poll's positions, instead of resetting to
+        None and costing an extra baseline-only poll before the next real
+        evaluation.  Used by the direction-change and startup-grace
+        branches: the current sample shouldn't itself be evaluated, but it
+        is trustworthy as a baseline for the next one.
+        """
+        ch._stall_window = []
+        ch._prev_commanded_pos = commanded_pos
+        ch._prev_measured_pos = measured_pos
 
     def _runout_handler(self, eventtime, ch):
         self.gcode.respond_info(
