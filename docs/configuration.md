@@ -40,20 +40,42 @@ stall_gcode:
     PAUSE                   # GCode to run on blockage (filament present but not moving)
 event_delay: 3.0            # Debounce delay in seconds before triggering events
 pause_on_runout: True       # Whether to auto-pause on runout
-stall_threshold_mm: 0.5     # Minimum feed movement per poll cycle to consider "moving"
+direction_invert: False     # Set True if FWD ejects filament instead of feeding
+require_motor_running: True # Set False for a passive-encoder setup (see below)
+pause_on_stall: True        # Whether to auto-pause on a detected blockage
+min_commanded_mm: 1.0       # Minimum commanded extrusion (mm) over the window before a stall is evaluated
+slip_ratio: 0.5             # Trip when measured feed is less than this fraction of commanded
+stall_window_polls: 3       # Consecutive polls forming the cumulative evaluation window
+stall_startup_ignore_polls: 2  # Polls to skip once the channel becomes eligible for stall detection
 ```
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `extruder` | (required) | Klipper extruder name this channel feeds |
+| `extruder` | (none) | Klipper extruder name this channel feeds. Without it, stall detection is disabled entirely for the channel; runout/insert are unaffected |
 | `runout_gcode` | (empty) | GCode macro to execute on filament runout |
 | `insert_gcode` | (empty) | GCode macro to execute on filament insertion |
 | `stall_gcode` | (empty) | GCode macro to execute on blockage/stall |
 | `event_delay` | `3.0` | Seconds to debounce before triggering events |
 | `pause_on_runout` | `True` | Auto-pause print on runout |
-| `stall_threshold_mm` | `0.5` | Minimum mm of feed movement per poll cycle |
+| `direction_invert` | `False` | Set True if FWD ejects filament instead of feeding (some V2.2 hardware has reversed motor wiring) |
+| `require_motor_running` | `True` | Whether the BMCU's own feeder motor must be running for stall detection to evaluate. Set False for a passive-encoder setup — see "Passive-encoder setups" below |
+| `pause_on_stall` | `True` | Auto-pause print on a detected blockage, independently of `stall_gcode` — see the upgrade callout below |
+| `min_commanded_mm` | `1.0` | Minimum commanded extrusion (mm) over the window before a stall is even evaluated — ignores travel/retraction/slow features |
+| `slip_ratio` | `0.5` | Trip when measured feed is less than this fraction of commanded — `0.5` means fed less than half of what Klipper commanded |
+| `stall_window_polls` | `3` | Number of consecutive polls forming the cumulative evaluation window — this IS the debounce (a real jam must persist across the whole window) |
+| `stall_startup_ignore_polls` | `2` | Number of polls to skip once the channel becomes eligible for stall detection (grace window for motor acceleration, or for the channel becoming eligible on a passive setup) |
 
 Channels are numbered 0–3, corresponding to the physical BMCU channel connectors. Add one `[bmcu_channel N]` section per active channel. Unused channels can be omitted.
+
+#### Passive-encoder setups
+
+During a normal print on most printers, the toolhead extruder pulls the filament and the BMCU feeder motor is idle, so `motor_running` reports `False` for the whole job. With the default `require_motor_running: True`, the drift check is skipped entirely and `stall_count` stays `0` no matter how badly filament jams downstream of the BMCU.
+
+Setting `require_motor_running: False` per channel makes the detector compare Klipper's commanded extrusion against the encoder's measured feed regardless of whether the feeder motor is running. The false-positive guards — `min_commanded_mm`, the retraction handling, the direction-change reset, and `stall_startup_ignore_polls` — all remain active in this mode. The grace window is armed when the channel becomes eligible (filament present and sensor enabled) rather than at motor start, since a passive channel may never see a motor-off-to-on edge at all.
+
+#### Behaviour change on upgrade: `pause_on_stall`
+
+`pause_on_stall` defaults to `True`. An existing install that left `stall_gcode` empty previously logged a detected blockage silently (the old stall path had no pause of its own); it will now pause the print when a stall fires. Set `pause_on_stall: False` per channel to restore the old silent-logging behaviour.
 
 ### GCode commands
 

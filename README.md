@@ -98,6 +98,10 @@ The Klipper extra exposes the following gcode commands:
 
 Runout detection on any active channel triggers a configurable Klipper pause macro.
 
+### Jam and blockage detection
+
+The extra compares Klipper's commanded extrusion against the BMCU encoder's measured feed over a rolling window, and pauses the print when measured feed falls short for a sustained stretch — see [docs/configuration.md](docs/configuration.md) for the tuning knobs. A setup where the toolhead extruder pulls the filament (the BMCU acting as a passive encoder) needs `require_motor_running: False`, or the check never runs at all.
+
 ---
 
 ## Firmware
