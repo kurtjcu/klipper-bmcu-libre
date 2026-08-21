@@ -43,10 +43,10 @@ pause_on_runout: True       # Whether to auto-pause on runout
 direction_invert: False     # Set True if FWD ejects filament instead of feeding
 require_motor_running: True # Set False for a passive-encoder setup (see below)
 pause_on_stall: True        # Whether to auto-pause on a detected blockage
-min_commanded_mm: 1.0       # Minimum commanded extrusion (mm) over the window before a stall is evaluated
-slip_ratio: 0.5             # Trip when measured feed is less than this fraction of commanded
-stall_window_polls: 3       # Consecutive polls forming the cumulative evaluation window
-stall_startup_ignore_polls: 2  # Polls to skip once the channel becomes eligible for stall detection
+min_measured_mm: 1.0        # Encoder movement (mm) within stall_timeout_s that counts as "alive"
+stall_timeout_s: 15.0       # Seconds the encoder may go without movement before a stall fires
+min_commanded_mm: 5.0       # Forward extrusion (mm) that must be commanded before a stall is evaluated
+pause_on_encoder_fault: False  # Whether to auto-pause on a detected encoder fault (dead magnet sensor)
 ```
 
 | Parameter | Default | Description |
@@ -60,18 +60,40 @@ stall_startup_ignore_polls: 2  # Polls to skip once the channel becomes eligible
 | `direction_invert` | `False` | Set True if FWD ejects filament instead of feeding (some V2.2 hardware has reversed motor wiring) |
 | `require_motor_running` | `True` | Whether the BMCU's own feeder motor must be running for stall detection to evaluate. Set False for a passive-encoder setup — see "Passive-encoder setups" below |
 | `pause_on_stall` | `True` | Auto-pause print on a detected blockage, independently of `stall_gcode` — see the upgrade callout below |
-| `min_commanded_mm` | `1.0` | Minimum commanded extrusion (mm) over the window before a stall is even evaluated — ignores travel/retraction/slow features |
-| `slip_ratio` | `0.5` | Trip when measured feed is less than this fraction of commanded — `0.5` means fed less than half of what Klipper commanded |
-| `stall_window_polls` | `3` | Number of consecutive polls forming the cumulative evaluation window — this IS the debounce (a real jam must persist across the whole window) |
-| `stall_startup_ignore_polls` | `2` | Number of polls to skip once the channel becomes eligible for stall detection (grace window for motor acceleration, or for the channel becoming eligible on a passive setup) |
+| `min_measured_mm` | `1.0` | Encoder movement (mm) within `stall_timeout_s` that counts as "alive" — the noise floor |
+| `stall_timeout_s` | `15.0` | Seconds the encoder may go without confirmed movement before a stall fires. Wall-clock time, independent of `poll_interval` |
+| `min_commanded_mm` | `5.0` | Forward extrusion (mm) that must be commanded since the last confirmed movement before a stall is even evaluated — ignores travel/retraction/slow features |
+| `pause_on_encoder_fault` | `False` | Auto-pause on a detected encoder fault (non-ok magnet status) — see "Encoder faults" below |
 
 Channels are numbered 0–3, corresponding to the physical BMCU channel connectors. Add one `[bmcu_channel N]` section per active channel. Unused channels can be omitted.
 
+#### Deprecated options
+
+`slip_ratio`, `stall_window_polls` and `stall_startup_ignore_polls` are accepted and silently ignored — Klipper rejects a config option no module reads, so removing them would stop an existing printer booting on an unedited config. They will be removed in a later release; delete them from your config once you've migrated to `min_measured_mm` / `stall_timeout_s` / `min_commanded_mm` above.
+
+| Parameter | Status |
+|-----------|--------|
+| `slip_ratio` | Deprecated — accepted, ignored |
+| `stall_window_polls` | Deprecated — accepted, ignored |
+| `stall_startup_ignore_polls` | Deprecated — accepted, ignored |
+
 #### Passive-encoder setups
 
-During a normal print on most printers, the toolhead extruder pulls the filament and the BMCU feeder motor is idle, so `motor_running` reports `False` for the whole job. With the default `require_motor_running: True`, the drift check is skipped entirely and `stall_count` stays `0` no matter how badly filament jams downstream of the BMCU.
+During a normal print on most printers, the toolhead extruder pulls the filament and the BMCU feeder motor is idle, so `motor_running` reports `False` for the whole job. With the default `require_motor_running: True`, the detector is skipped entirely and `stall_count` stays `0` no matter how badly filament jams downstream of the BMCU.
 
-Setting `require_motor_running: False` per channel makes the detector compare Klipper's commanded extrusion against the encoder's measured feed regardless of whether the feeder motor is running. The false-positive guards — `min_commanded_mm`, the retraction handling, the direction-change reset, and `stall_startup_ignore_polls` — all remain active in this mode. The grace window is armed when the channel becomes eligible (filament present and sensor enabled) rather than at motor start, since a passive channel may never see a motor-off-to-on edge at all.
+Setting `require_motor_running: False` per channel makes the detector evaluate regardless of whether the feeder motor is running. The detector no longer compares magnitudes — it asks whether the encoder moved at all — so the compliance/slack between the BMCU and the toolhead (Bowden, buffer, spring slack) is no longer a source of false positives: once slack is taken up, the encoder moves whenever the extruder does, and any single poll of confirmed movement re-baselines the tracker. Partial slip — the encoder moving, but less than commanded — is deliberately not detected at all; calibrating a feeder-to-extruder ratio per channel was judged not worth the effort for a rare failure mode.
+
+`min_commanded_mm` and `stall_timeout_s` interact: `min_commanded_mm` must be reachable within `stall_timeout_s` or the detector never fires. `min_commanded_mm / stall_timeout_s` is the implied minimum sustained extrusion rate below which the detector is inert by construction — `0.333 mm/s` at the shipped defaults (`5.0 / 15.0`). This is logged at Klipper startup and exposed live as `bmcu_feeder.channels.N.stall_min_rate_mms`, so a never-fires configuration is visible rather than silent.
+
+If you are upgrading from the pre-260821-e77 defaults and still have `min_commanded_mm: 1.0` in your printer.cfg, raise it to `5.0` (the new shipped default) — at `1.0` the implied minimum rate falls to `0.067 mm/s`, well below any real print speed. Lowering `stall_timeout_s` detects a jam faster at the cost of tolerating less slack take-up before the encoder is judged to have moved.
+
+#### Encoder faults
+
+A non-`ok` magnet status (`low`, `high`, `offline`, or any value other than `ok`/`unknown`), debounced over 3 consecutive polls (~1.5s at the default `poll_interval`), raises an `encoder_fault` event instead of a blockage and suspends stall evaluation until the magnet reads `ok` again. A dead AS5600 and a real jam otherwise produce byte-identical `feed_mm` output — reporting the fault distinctly means a broken sensor is never mistaken for (or reported as) filament jamming.
+
+`unknown` — the module's own initial value before the first `STATUS ok` line arrives — is never treated as a fault.
+
+`pause_on_encoder_fault` defaults to `False`: losing sight of the filament is a loss of observability, not a detected failure, and stopping a good print to guard against a jam that may not exist is the more expensive mistake. Set it `True` per channel to stop the print rather than continue unwatched.
 
 #### Behaviour change on upgrade: `pause_on_stall`
 
@@ -89,8 +111,26 @@ Setting `require_motor_running: False` per channel makes the detector compare Kl
 | `BMCU_ENABLE` | Send ENABLE to firmware (init hardware) |
 | `BMCU_DISCONNECT` | Disable firmware and release serial port for flashing |
 | `BMCU_CONNECT` | Reconnect serial port after flashing |
-| `BMCU_RESET_FEED` | Reset feed distance counter (all channels or `CHANNEL=N`) |
+| `BMCU_RESET_FEED` | Reset feed distance counter and the activity tracker (all channels or `CHANNEL=N`). Call this from `PRINT_START` so the opening purge starts from a clean slate |
 | `SET_BMCU_SENSOR CHANNEL=N ENABLE=0\|1` | Disable/enable runout detection for channel N |
+
+### Moonraker objects
+
+Status objects are available at `printer.bmcu_feeder.channels.N`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `feed_mm` | float | Raw encoder distance (mm) |
+| `feed_mm_since_reset` | float | Distance since the last `BMCU_RESET_FEED` |
+| `stall_count` | int | Cumulative stall events since the last reset |
+| `filament_present` | bool | Filament sensor state |
+| `motor_running` | bool | Motor running state |
+| `mag_status` | str | Raw magnet status reported by firmware (`ok`/`low`/`high`/`offline`/`unknown`) |
+| `sensor_enabled` | bool | Whether `SET_BMCU_SENSOR` has this channel's sensor enabled |
+| `stall_min_rate_mms` | float | Implied minimum sustained extrusion rate (`min_commanded_mm / stall_timeout_s`) the detector can catch |
+| `seconds_since_movement` | float | Time since the encoder last showed confirmed movement |
+| `commanded_since_movement` | float | Forward mm commanded since the last confirmed movement |
+| `encoder_fault` | bool | True while the magnet status is faulted and stall evaluation is suspended |
 
 ---
 
