@@ -1066,7 +1066,7 @@ class TestBmcuStallDetection:
 
     def _poll(self, feeder, ch, commanded_pos, measured_mm,
               filament_present=True, motor_running=True, direction='FWD',
-              at=None):
+              at=None, mag=None):
         """Drive one poll: set the extruder's commanded position and the
         channel's measured feed_mm, then call _check_events with the
         previous state snapshotted beforehand.
@@ -1074,6 +1074,10 @@ class TestBmcuStallDetection:
         When at is given, the reactor clock is set to that absolute value;
         otherwise it advances by feeder.poll_interval, so a sequence of
         _poll() calls approximates real elapsed time between polls.
+
+        mag only writes ch.state['mag_status'] when not None, so every
+        existing call site keeps leaving 'unknown' in place and stays
+        byte-identical.
         """
         if at is not None:
             feeder.reactor._monotonic_time = at
@@ -1089,6 +1093,8 @@ class TestBmcuStallDetection:
             'feed_mm': measured_mm,
             'direction': direction,
         })
+        if mag is not None:
+            ch.state['mag_status'] = mag
         feeder._check_events(ch, old_state)
 
     def test_partial_slip_never_fires(self, monkeypatch):
@@ -1610,6 +1616,192 @@ class TestBmcuStallDetection:
         assert not hasattr(feeder, '_prev_mm'), \
             "BmcuFeeder must not carry removed attribute _prev_mm"
 
+    def test_encoder_fault_debounced_raises_once(self, monkeypatch):
+        """mag=offline on two consecutive polls raises nothing; the third
+        raises exactly one encoder_fault callback, and further offline
+        polls do not re-raise it. Measured keeps moving well above
+        min_measured_mm throughout so the activity detector itself never
+        fires and cannot be confused with the fault event."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
+        reactor.callbacks.clear()
+
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=5.0, mag='offline')
+        assert len(reactor.callbacks) == 0
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=10.0, mag='offline')
+        assert len(reactor.callbacks) == 0
+        assert ch._mag_faulted is False
+
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=15.0, mag='offline')
+        assert len(reactor.callbacks) == 1
+        assert ch._mag_faulted is True
+
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=20.0, measured_mm=20.0, mag='offline')
+        assert len(reactor.callbacks) == 0, \
+            "further offline polls must not re-raise the fault"
+
+    def test_mag_offline_uppercase_faults_identically(self, monkeypatch):
+        """mag=OFFLINE faults identically to mag=offline -- comparison is
+        case-insensitive."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
+        reactor.callbacks.clear()
+
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=5.0, mag='OFFLINE')
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=10.0, mag='OFFLINE')
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=15.0, mag='OFFLINE')
+
+        assert ch._mag_faulted is True
+        assert len(reactor.callbacks) == 1
+
+    def test_mag_unknown_not_a_fault_jam_still_fires(self, monkeypatch):
+        """mag=unknown for any number of polls is NOT a fault -- it is the
+        module's own initial value, and what the harness leaves in place --
+        and a real jam still fires through it."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0, mag='unknown')
+        reactor.callbacks.clear()
+
+        for _ in range(10):
+            self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0, mag='unknown')
+        assert ch._mag_faulted is False, \
+            "mag=unknown must never accumulate into a fault"
+
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=0.0, mag='unknown')
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=0.0, mag='unknown')
+
+        assert len(reactor.callbacks) == 1, \
+            "a real jam must still fire through mag=unknown"
+
+    def test_encoder_fault_suppresses_stall_and_blockage_message(self, monkeypatch):
+        """While faulted, a jam pattern that would otherwise fire raises no
+        stall callback, and no emitted line describes a blockage."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        gcode = feeder.gcode
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
+        reactor.callbacks.clear()
+
+        # Debounce the fault in; measured keeps moving so the activity
+        # detector itself stays quiet while the fault streak accumulates.
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=5.0, mag='offline')
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=10.0, mag='offline')
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=15.0, mag='offline')
+        assert ch._mag_faulted is True
+        reactor.callbacks.clear()
+        gcode._responses.clear()
+
+        # Jam-like pattern while faulted: commanded keeps advancing,
+        # measured pinned flat, run well past stall_timeout_s.
+        commanded = 15.0
+        for _ in range(10):
+            commanded += 5.0
+            self._poll(feeder, ch, commanded_pos=commanded, measured_mm=15.0,
+                       mag='offline')
+
+        assert len(reactor.callbacks) == 0, \
+            "a jam pattern while encoder-faulted must not fire a stall"
+        assert not any('blockage' in r.lower() for r in gcode._responses), \
+            "a dead encoder must never be reported as a blockage"
+
+    def test_encoder_fault_clears_and_rebaselines(self, monkeypatch):
+        """After a fault, a single mag=ok poll clears it, raises one
+        recovery callback, and the detector resumes from a fresh baseline
+        rather than firing immediately."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        gcode = feeder.gcode
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
+        reactor.callbacks.clear()
+
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=5.0, mag='offline')
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=10.0, mag='offline')
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=15.0, mag='offline')
+        assert ch._mag_faulted is True
+        reactor.callbacks.clear()
+        gcode._responses.clear()
+
+        # A jam-shaped commanded/measured gap accumulated while faulted
+        # must not fire the instant the fault clears.
+        self._poll(feeder, ch, commanded_pos=100.0, measured_mm=15.0, mag='ok')
+
+        assert ch._mag_faulted is False
+        assert len(reactor.callbacks) == 1, \
+            "exactly the recovery callback must fire, not a stall"
+        reactor.callbacks[0](0.0)
+        assert any('encoder_fault_cleared' in r for r in gcode._responses)
+        assert ch._measured_ref == pytest.approx(15.0), \
+            "the detector must resume from a fresh baseline on recovery"
+
+    def test_pause_on_encoder_fault_default_false_no_pause(self, monkeypatch):
+        """pause_on_encoder_fault defaults False: the fault reports but
+        does not pause."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        reactor = feeder.reactor
+        ch = feeder._channels[0]
+        pause_resume = feeder.printer.lookup_object('pause_resume')
+        assert ch.pause_on_encoder_fault is False
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=5.0, mag='offline')
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=10.0, mag='offline')
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=15.0, mag='offline')
+
+        assert len(reactor.callbacks) == 1
+        reactor.callbacks[0](0.0)
+        assert pause_resume.pause_called is False
+
+    def test_pause_on_encoder_fault_true_pauses(self, monkeypatch):
+        """With pause_on_encoder_fault True, the fault pauses."""
+        feeder = self._make_feeder_with_channel(monkeypatch)
+        ch = feeder._channels[0]
+        ch.pause_on_encoder_fault = True
+        reactor = feeder.reactor
+        pause_resume = feeder.printer.lookup_object('pause_resume')
+
+        self._poll(feeder, ch, commanded_pos=0.0, measured_mm=0.0)
+        reactor.callbacks.clear()
+        self._poll(feeder, ch, commanded_pos=5.0, measured_mm=5.0, mag='offline')
+        self._poll(feeder, ch, commanded_pos=10.0, measured_mm=10.0, mag='offline')
+        self._poll(feeder, ch, commanded_pos=15.0, measured_mm=15.0, mag='offline')
+
+        assert len(reactor.callbacks) == 1
+        reactor.callbacks[0](0.0)
+        assert pause_resume.pause_called is True
+
+    def test_ready_time_deprecation_notice_and_reachability_warning(self, monkeypatch):
+        """Ready-time logs the deprecation notice once per channel that set
+        a deprecated option, and a warning when the implied minimum rate
+        exceeds 2.0 mm/s."""
+        feeder = self._make_feeder_with_channel(
+            monkeypatch, min_commanded_mm=10.0, stall_timeout_s=1.0)
+        gcode = feeder.gcode
+
+        deprecation_msgs = [r for r in gcode._responses if 'deprecated' in r]
+        assert len(deprecation_msgs) == 1, \
+            "deprecation notice must be logged exactly once for a " \
+            "channel that set a deprecated option"
+
+        rate_msgs = [r for r in gcode._responses if 'may never fire' in r]
+        assert len(rate_msgs) == 1, \
+            "a channel whose implied minimum rate exceeds 2.0 mm/s must " \
+            "warn at ready-time"
+
 
 # ===========================================================================
 # Plan 02-04 Task 1: get_status() and serial disconnect handling (KL-11, KL-12, KL-16)
@@ -1659,6 +1851,24 @@ class TestBmcuGetStatus:
         assert 'direction' in ch0
         assert 'mag_status' in ch0
         assert 'sensor_enabled' in ch0
+
+    def test_get_status_stall_observability_keys(self, monkeypatch):
+        """get_status exposes stall_min_rate_mms, seconds_since_movement,
+        commanded_since_movement and encoder_fault with float/float/float/
+        bool types, on a feeder that has only had _handle_connect called
+        (matching E77-F: the module defaults, 5.0/15.0, must be safe here
+        even though _handle_ready has never run)."""
+        feeder, _ = self._make_feeder_with_channels(monkeypatch, ch_ids=(0,))
+        result = feeder.get_status(0.0)
+        ch0 = result['channels']['0']
+        assert isinstance(ch0['stall_min_rate_mms'], float)
+        assert isinstance(ch0['seconds_since_movement'], float)
+        assert isinstance(ch0['commanded_since_movement'], float)
+        assert isinstance(ch0['encoder_fault'], bool)
+        assert ch0['stall_min_rate_mms'] == pytest.approx(5.0 / 15.0)
+        assert ch0['seconds_since_movement'] == pytest.approx(0.0)
+        assert ch0['commanded_since_movement'] == pytest.approx(0.0)
+        assert ch0['encoder_fault'] is False
 
     def test_status_immutability(self, monkeypatch):
         """Two consecutive get_status() calls return different dict objects."""
@@ -1904,6 +2114,55 @@ class TestBmcuDiagnostics:
         feeder._cmd_reset_feed(MockGcmd({'CHANNEL': 0}))
         assert ch._lifetime_stall_count == 0
         assert feeder.get_status(0.0)['channels']['0']['stall_count'] == 0
+
+    def test_reset_feed_clears_activity_tracker_single_channel(self, monkeypatch):
+        """BMCU_RESET_FEED CHANNEL=0 clears the activity tracker on the
+        addressed channel."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0,),
+                                                 min_commanded_mm=1.0)
+        ch = feeder._channels[0]
+        extruder = feeder.printer.lookup_object('extruder')
+        extruder.next_position = 0.0
+        self._dispatch(feeder, 0, 10.0)
+        feeder.reactor.callbacks.clear()
+        ch.min_event_systime = 0.0
+        extruder.next_position = 5.0
+        self._dispatch(feeder, 0, 10.0)
+        assert ch._measured_ref is not None
+        assert ch._commanded_since_movement > 0.0
+
+        feeder._cmd_reset_feed(MockGcmd({'CHANNEL': 0}))
+
+        assert ch._measured_ref is None
+        assert ch._last_movement_time is None
+        assert ch._prev_commanded_pos is None
+        assert ch._commanded_since_movement == pytest.approx(0.0)
+
+    def test_reset_feed_clears_activity_tracker_all_channels(self, monkeypatch):
+        """Bare BMCU_RESET_FEED clears the activity tracker on every
+        channel it addresses, so PRINT_START can hand the detector a clean
+        slate across the purge."""
+        feeder = self._make_feeder_with_channel(monkeypatch, ch_ids=(0, 1),
+                                                 min_commanded_mm=1.0)
+        extruder = feeder.printer.lookup_object('extruder')
+        for ch_id in (0, 1):
+            ch = feeder._channels[ch_id]
+            extruder.next_position = 0.0
+            self._dispatch(feeder, ch_id, 10.0)
+            feeder.reactor.callbacks.clear()
+            ch.min_event_systime = 0.0
+            extruder.next_position = 5.0
+            self._dispatch(feeder, ch_id, 10.0)
+            assert ch._measured_ref is not None
+
+        feeder._cmd_reset_feed(MockGcmd({}))
+
+        for ch_id in (0, 1):
+            ch = feeder._channels[ch_id]
+            assert ch._measured_ref is None
+            assert ch._last_movement_time is None
+            assert ch._prev_commanded_pos is None
+            assert ch._commanded_since_movement == pytest.approx(0.0)
 
     def test_feed_mm_since_reset_in_get_status(self, monkeypatch):
         """get_status shows feed_mm_since_reset as delta from first-poll init."""

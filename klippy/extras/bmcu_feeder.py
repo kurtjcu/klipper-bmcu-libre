@@ -23,6 +23,18 @@ _STATUS_FIELD_RE = re.compile(
 
 logger = logging.getLogger(__name__)
 
+# Encoder-fault debounce (E77-D): number of consecutive non-ok, non-unknown
+# mag_status polls required before a channel is treated as faulted. A
+# constant, not a config option -- this module's failures have all come
+# from interacting knobs, and 3 polls at the default poll_interval (0.5s)
+# is 1.5s of sustained I2C silence.
+_MAG_FAULT_DEBOUNCE_POLLS = 3
+
+# Reachability warning threshold (E77-F): implied minimum sustained
+# extrusion rate (min_commanded_mm / stall_timeout_s) above which the
+# detector may never fire at typical print rates.
+_STALL_RATE_WARNING_MMS = 2.0
+
 
 # ---------------------------------------------------------------------------
 # BmcuSerial — non-blocking serial I/O via Klipper reactor fd-watching
@@ -158,6 +170,13 @@ class BmcuChannel:
         # Mirrors pause_on_runout: pause the print on a detected blockage
         # independently of whether stall_gcode is configured/succeeds.
         self.pause_on_stall = config.getboolean('pause_on_stall', True)
+        # A dead encoder is a loss of observability, not a detected
+        # failure -- pausing a healthy print because a sensor went quiet
+        # destroys good work to protect against a jam that may not exist.
+        # Defaults False; opt in per channel to stop rather than print
+        # unwatched.
+        self.pause_on_encoder_fault = config.getboolean(
+            'pause_on_encoder_fault', False)
         # Activity (liveness) stall detection: fires when the encoder shows
         # no meaningful movement for stall_timeout_s while at least
         # min_commanded_mm of forward extrusion was commanded in that span.
@@ -194,6 +213,13 @@ class BmcuChannel:
         self._extruder_obj = None
         self._stall_enabled = True
         self._stall_eligible_prev = False
+        # Encoder-fault debounce (E77-D): a non-ok, non-unknown mag_status
+        # must persist for _MAG_FAULT_DEBOUNCE_POLLS before it is trusted --
+        # the BOOT line reports all magnets offline transiently before
+        # ENABLE returns ok, so acting on the raw boot value would fault
+        # every startup.
+        self._mag_faulted = False
+        self._mag_fault_streak = 0
         self._feed_mm_at_reset = 0.0
         self._lifetime_stall_count = 0
         self._feed_mm_initialized = False
@@ -304,6 +330,39 @@ class BmcuFeeder:
                 logging.warning(
                     "BMCU ch%d: extruder '%s' not found — stall detection disabled"
                     % (ch.channel_id, ch.extruder))
+        for ch in self._channels.values():
+            # Deprecated-option notice (E77-A). Ready-time rather than
+            # config-time: a config-time log lands only in klippy.log
+            # where nobody looks, whereas respond_info at ready surfaces
+            # it once in the console, and _handle_ready is already this
+            # module's per-channel validation point.
+            if ch._deprecated_present:
+                msg = (
+                    "BMCU ch%d: config option(s) %s are deprecated and "
+                    "ignored — remove them from printer.cfg" %
+                    (ch.channel_id, ", ".join(ch._deprecated_present)))
+                logging.warning(msg)
+                self.gcode.respond_info(msg)
+            # Reachability (E77-F). Advisory only — never raise from
+            # _handle_ready, Klipper forbids it. Skipped entirely when
+            # stall detection is disabled for this channel, so an
+            # extruder-less channel still logs exactly one warning.
+            if ch._stall_enabled:
+                rate = ch.min_commanded_mm / ch.stall_timeout_s
+                logging.info(
+                    "BMCU ch%d: stall detector implied minimum sustained "
+                    "extrusion rate %.3f mm/s (min_commanded_mm=%.2f / "
+                    "stall_timeout_s=%.1f)" %
+                    (ch.channel_id, rate, ch.min_commanded_mm,
+                     ch.stall_timeout_s))
+                if rate > _STALL_RATE_WARNING_MMS:
+                    msg = (
+                        "BMCU ch%d: stall detector may never fire at "
+                        "typical print rates — implied minimum sustained "
+                        "extrusion rate is %.3f mm/s" %
+                        (ch.channel_id, rate))
+                    logging.warning(msg)
+                    self.gcode.respond_info(msg)
         self._poll_timer_handle = self.reactor.register_timer(
             self._poll_status,
             self.reactor.monotonic() + self.poll_interval)
@@ -448,11 +507,13 @@ class BmcuFeeder:
             ch = self._channels[ch_id]
             ch._feed_mm_at_reset = ch.state.get('feed_mm', 0.0)
             ch._lifetime_stall_count = 0
+            self._reset_activity_tracker(ch)
             gcmd.respond_info("BMCU channel %d feed counter reset" % ch_id)
         else:
             for cid, ch in self._channels.items():
                 ch._feed_mm_at_reset = ch.state.get('feed_mm', 0.0)
                 ch._lifetime_stall_count = 0
+                self._reset_activity_tracker(ch)
             gcmd.respond_info("BMCU all channels feed counter reset")
 
     def _cmd_status(self, gcmd):
@@ -523,12 +584,23 @@ class BmcuFeeder:
         toolchanger's BMCU_STOP masked that via motor_running; on a passive
         channel nothing masks it, so sensor_enabled becomes the
         passive-mode equivalent of the motor-stop reset.
+
+        not ch._mag_faulted (E77-D, E77-G) folds the encoder-fault gate
+        into this SAME local rather than a second, parallel condition at
+        the call site — two gating expressions drifting apart is exactly
+        how the trailing else went stale in 260821-akv.
         """
         return (ch.state['filament_present'] and ch.sensor_enabled and
+                not ch._mag_faulted and
                 (ch.state['motor_running'] or not ch.require_motor_running))
 
     def _check_events(self, ch, old_state):
         now = self.reactor.monotonic()
+        # Encoder health is a sensor-liveness fact, not a print event, so it
+        # must keep tracking while runout/stall events are debounced by
+        # min_event_systime below; it is edge-triggered itself, so it
+        # cannot spam.
+        self._update_encoder_fault(ch)
         if now < ch.min_event_systime:
             return
         old_fil = old_state.get('filament_present')
@@ -652,6 +724,56 @@ class BmcuFeeder:
         ch._prev_commanded_pos = commanded_pos
         ch._commanded_since_movement = 0.0
 
+    def _update_encoder_fault(self, ch):
+        """Debounced mag_status health check (E77-D). 'ok', 'unknown' and
+        empty are healthy -- 'unknown' is the module's own initial value
+        and what a channel reports before its first STATUS ok line, so it
+        must never count as a fault (treating it as one would disable
+        stall detection for every channel that has not yet reported in).
+        Anything else (low/high/offline/OFFLINE/...) is unhealthy; after
+        _MAG_FAULT_DEBOUNCE_POLLS consecutive unhealthy polls the channel
+        is marked faulted, which _stall_eligible folds into the single
+        stall_eligible local so a dead encoder cannot masquerade as a jam.
+        Lowercasing before comparison is defensive -- the firmware emits
+        lowercase today, but the module must not depend on that.
+        """
+        mag = str(ch.state.get('mag_status', '')).strip().lower()
+        if mag in ('ok', 'unknown', ''):
+            ch._mag_fault_streak = 0
+            if ch._mag_faulted:
+                ch._mag_faulted = False
+                self.reactor.register_callback(
+                    lambda et, c=ch: self._encoder_fault_cleared_handler(et, c))
+            return
+        ch._mag_fault_streak += 1
+        if not ch._mag_faulted and ch._mag_fault_streak >= _MAG_FAULT_DEBOUNCE_POLLS:
+            ch._mag_faulted = True
+            self.reactor.register_callback(
+                lambda et, c=ch: self._encoder_fault_handler(et, c))
+
+    def _encoder_fault_handler(self, eventtime, ch):
+        mag = ch.state.get('mag_status', 'unknown')
+        self.gcode.respond_info(
+            "BMCU ch%d: encoder fault — magnet status '%s', blockage "
+            "detection suspended (this is a sensor fault, not a jam)" %
+            (ch.channel_id, mag))
+        self.gcode.respond_info(
+            "BMCU_EVENT event=encoder_fault channel=%d mag_status=%s" %
+            (ch.channel_id, mag))
+        logging.warning(
+            "BMCU ch%d: encoder fault — magnet status '%s'" %
+            (ch.channel_id, mag))
+        if ch.pause_on_encoder_fault:
+            pause_resume = self.printer.lookup_object('pause_resume')
+            pause_resume.send_pause_command()
+
+    def _encoder_fault_cleared_handler(self, eventtime, ch):
+        self.gcode.respond_info(
+            "BMCU ch%d: encoder fault cleared — blockage detection resumed"
+            % ch.channel_id)
+        self.gcode.respond_info(
+            "BMCU_EVENT event=encoder_fault_cleared channel=%d" % ch.channel_id)
+
     def _runout_handler(self, eventtime, ch):
         self.gcode.respond_info(
             "BMCU: filament runout on channel %d — pausing print" % ch.channel_id)
@@ -722,6 +844,14 @@ class BmcuFeeder:
                     'feed_mm_since_reset': float(
                         ch.state.get('feed_mm', 0.0) - ch._feed_mm_at_reset),
                     'stall_count': int(ch._lifetime_stall_count),
+                    'stall_min_rate_mms': float(
+                        ch.min_commanded_mm / ch.stall_timeout_s),
+                    'seconds_since_movement': float(
+                        eventtime - ch._last_movement_time)
+                        if ch._last_movement_time is not None else 0.0,
+                    'commanded_since_movement': float(
+                        ch._commanded_since_movement),
+                    'encoder_fault': bool(ch._mag_faulted),
                 }
                 for ch_id, ch in self._channels.items()
             }
