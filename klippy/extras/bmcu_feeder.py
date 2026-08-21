@@ -23,6 +23,18 @@ _STATUS_FIELD_RE = re.compile(
 
 logger = logging.getLogger(__name__)
 
+# Encoder-fault debounce (E77-D): number of consecutive non-ok, non-unknown
+# mag_status polls required before a channel is treated as faulted. A
+# constant, not a config option -- this module's failures have all come
+# from interacting knobs, and 3 polls at the default poll_interval (0.5s)
+# is 1.5s of sustained I2C silence.
+_MAG_FAULT_DEBOUNCE_POLLS = 3
+
+# Reachability warning threshold (E77-F): implied minimum sustained
+# extrusion rate (min_commanded_mm / stall_timeout_s) above which the
+# detector may never fire at typical print rates.
+_STALL_RATE_WARNING_MMS = 2.0
+
 
 # ---------------------------------------------------------------------------
 # BmcuSerial — non-blocking serial I/O via Klipper reactor fd-watching
@@ -158,33 +170,56 @@ class BmcuChannel:
         # Mirrors pause_on_runout: pause the print on a detected blockage
         # independently of whether stall_gcode is configured/succeeds.
         self.pause_on_stall = config.getboolean('pause_on_stall', True)
-        # Drift-aware stall detection: compares Klipper's COMMANDED extrusion
-        # (via extruder.find_past_position) against BMCU MEASURED feed over a
-        # rolling window, rather than an absolute per-poll delta threshold.
+        # A dead encoder is a loss of observability, not a detected
+        # failure -- pausing a healthy print because a sensor went quiet
+        # destroys good work to protect against a jam that may not exist.
+        # Defaults False; opt in per channel to stop rather than print
+        # unwatched.
+        self.pause_on_encoder_fault = config.getboolean(
+            'pause_on_encoder_fault', False)
+        # Activity (liveness) stall detection: fires when the encoder shows
+        # no meaningful movement for stall_timeout_s while at least
+        # min_commanded_mm of forward extrusion was commanded in that span.
+        # No ratio, no correlation, no window list -- one time base.
         self.min_commanded_mm = config.getfloat(
-            'min_commanded_mm', 1.0, minval=0.0)
-        self.slip_ratio = config.getfloat(
-            'slip_ratio', 0.5, minval=0.0, maxval=1.0)
-        self.stall_window_polls = config.getint(
-            'stall_window_polls', 3, minval=1)
-        self.stall_startup_ignore_polls = config.getint(
-            'stall_startup_ignore_polls', 2, minval=0)
-        # Rolling window of (forward_commanded_delta, measured_delta) tuples,
-        # capped at stall_window_polls entries.
-        self._stall_window = []
+            'min_commanded_mm', 5.0, minval=0.1)
+        self.stall_timeout_s = config.getfloat(
+            'stall_timeout_s', 15.0, minval=1.0)
+        self.min_measured_mm = config.getfloat(
+            'min_measured_mm', 1.0, minval=0.1)
+        # Deprecated (E77-A): read as documented no-ops so an existing
+        # printer.cfg that still sets these does not hard-error at startup
+        # -- Klipper rejects a config option no module reads. Compared with
+        # `is not None`, never truthiness -- a configured 0 is falsy but
+        # present. Values are intentionally not stored or consulted.
+        self._deprecated_present = []
+        for _dep_name in ('slip_ratio', 'stall_window_polls',
+                           'stall_startup_ignore_polls'):
+            if config.get(_dep_name, None) is not None:
+                self._deprecated_present.append(_dep_name)
+        # Activity tracker: encoder reading/time at last confirmed movement,
+        # and forward commanded mm accumulated since then.
+        self._measured_ref = None
+        self._last_movement_time = None
+        self._commanded_since_movement = 0.0
         self._prev_commanded_pos = None
-        self._prev_measured_pos = None
-        # Stashed window totals at fire time, read by _stall_handler.
-        self._stall_window_commanded = 0.0
-        self._stall_window_measured = 0.0
+        # Stashed values at fire time, read by _stall_handler.
+        self._stall_commanded_mm = 0.0
+        self._stall_measured_mm = 0.0
+        self._stall_stalled_s = 0.0
         # Resolved at ready-time (BmcuFeeder._handle_ready): the extruder
         # object for find_past_position, and whether stall detection is
         # possible at all for this channel (False when extruder is None).
         self._extruder_obj = None
         self._stall_enabled = True
-        self._startup_polls_remaining = 0
         self._stall_eligible_prev = False
-        self._direction_just_changed = False
+        # Encoder-fault debounce (E77-D): a non-ok, non-unknown mag_status
+        # must persist for _MAG_FAULT_DEBOUNCE_POLLS before it is trusted --
+        # the BOOT line reports all magnets offline transiently before
+        # ENABLE returns ok, so acting on the raw boot value would fault
+        # every startup.
+        self._mag_faulted = False
+        self._mag_fault_streak = 0
         self._feed_mm_at_reset = 0.0
         self._lifetime_stall_count = 0
         self._feed_mm_initialized = False
@@ -239,7 +274,6 @@ class BmcuFeeder:
         self.poll_interval = config.getfloat('poll_interval', 0.5, minval=0.1)
         self._serial = None
         self._poll_timer_handle = None
-        self._prev_mm = {}
         self._channels = {}
         self._estimated_print_time = None
         self.printer.register_event_handler("klippy:connect",
@@ -296,6 +330,39 @@ class BmcuFeeder:
                 logging.warning(
                     "BMCU ch%d: extruder '%s' not found — stall detection disabled"
                     % (ch.channel_id, ch.extruder))
+        for ch in self._channels.values():
+            # Deprecated-option notice (E77-A). Ready-time rather than
+            # config-time: a config-time log lands only in klippy.log
+            # where nobody looks, whereas respond_info at ready surfaces
+            # it once in the console, and _handle_ready is already this
+            # module's per-channel validation point.
+            if ch._deprecated_present:
+                msg = (
+                    "BMCU ch%d: config option(s) %s are deprecated and "
+                    "ignored — remove them from printer.cfg" %
+                    (ch.channel_id, ", ".join(ch._deprecated_present)))
+                logging.warning(msg)
+                self.gcode.respond_info(msg)
+            # Reachability (E77-F). Advisory only — never raise from
+            # _handle_ready, Klipper forbids it. Skipped entirely when
+            # stall detection is disabled for this channel, so an
+            # extruder-less channel still logs exactly one warning.
+            if ch._stall_enabled:
+                rate = ch.min_commanded_mm / ch.stall_timeout_s
+                logging.info(
+                    "BMCU ch%d: stall detector implied minimum sustained "
+                    "extrusion rate %.3f mm/s (min_commanded_mm=%.2f / "
+                    "stall_timeout_s=%.1f)" %
+                    (ch.channel_id, rate, ch.min_commanded_mm,
+                     ch.stall_timeout_s))
+                if rate > _STALL_RATE_WARNING_MMS:
+                    msg = (
+                        "BMCU ch%d: stall detector may never fire at "
+                        "typical print rates — implied minimum sustained "
+                        "extrusion rate is %.3f mm/s" %
+                        (ch.channel_id, rate))
+                    logging.warning(msg)
+                    self.gcode.respond_info(msg)
         self._poll_timer_handle = self.reactor.register_timer(
             self._poll_status,
             self.reactor.monotonic() + self.poll_interval)
@@ -440,11 +507,13 @@ class BmcuFeeder:
             ch = self._channels[ch_id]
             ch._feed_mm_at_reset = ch.state.get('feed_mm', 0.0)
             ch._lifetime_stall_count = 0
+            self._reset_activity_tracker(ch)
             gcmd.respond_info("BMCU channel %d feed counter reset" % ch_id)
         else:
             for cid, ch in self._channels.items():
                 ch._feed_mm_at_reset = ch.state.get('feed_mm', 0.0)
                 ch._lifetime_stall_count = 0
+                self._reset_activity_tracker(ch)
             gcmd.respond_info("BMCU all channels feed counter reset")
 
     def _cmd_status(self, gcmd):
@@ -515,12 +584,23 @@ class BmcuFeeder:
         toolchanger's BMCU_STOP masked that via motor_running; on a passive
         channel nothing masks it, so sensor_enabled becomes the
         passive-mode equivalent of the motor-stop reset.
+
+        not ch._mag_faulted (E77-D, E77-G) folds the encoder-fault gate
+        into this SAME local rather than a second, parallel condition at
+        the call site — two gating expressions drifting apart is exactly
+        how the trailing else went stale in 260821-akv.
         """
         return (ch.state['filament_present'] and ch.sensor_enabled and
+                not ch._mag_faulted and
                 (ch.state['motor_running'] or not ch.require_motor_running))
 
     def _check_events(self, ch, old_state):
         now = self.reactor.monotonic()
+        # Encoder health is a sensor-liveness fact, not a print event, so it
+        # must keep tracking while runout/stall events are debounced by
+        # min_event_systime below; it is edge-triggered itself, so it
+        # cannot spam.
+        self._update_encoder_fault(ch)
         if now < ch.min_event_systime:
             return
         old_fil = old_state.get('filament_present')
@@ -542,49 +622,34 @@ class BmcuFeeder:
                     self.reactor.register_callback(
                         lambda et, c=ch: self._insert_handler(et, c))
 
-        # --- Stall eligibility transition: arm the startup grace window and
-        # reset the stall window on a not-eligible -> eligible transition,
-        # rather than on the motor-off-to-on edge. The old motor edge never
-        # occurs on a passive channel, so stall_startup_ignore_polls would
-        # otherwise be dead config; keying off eligibility subsumes the
-        # motor edge on an active channel and is strictly more
-        # conservative — it can arm a grace window in cases the old code
-        # did not, never fewer. This is also what lets an administrative
-        # sensor_enabled toggle re-arm the grace on a passive channel.
+        # --- Stall eligibility transition: re-baseline the activity tracker
+        # on a not-eligible -> eligible transition. RETAIN this transition
+        # reset rather than relying on the trailing ineligible branch alone:
+        # _check_events returns early above while now is below
+        # ch.min_event_systime, so a channel that goes ineligible and back
+        # inside a suppression window would otherwise resume against a
+        # stale _last_movement_time. _stall_eligible_prev exists for
+        # exactly that; it is not dead state.
         stall_eligible = self._stall_eligible(ch)
         if stall_eligible and not ch._stall_eligible_prev:
-            ch._startup_polls_remaining = ch.stall_startup_ignore_polls
-            self._reset_stall_window(ch)
+            self._reset_activity_tracker(ch)
         ch._stall_eligible_prev = stall_eligible
 
-        # --- Direction-change detection: reset _prev_mm and set suppression flag ---
-        # With the motor idle (require_motor_running False), direction
-        # transitions are driven purely by encoder movement and can be
-        # noisier than a commanded motor reversal, so a passive channel may
-        # reset its window more often than an active one. That is fail-safe
-        # (a reset can only delay a stall, never manufacture one) but a
-        # passive channel that chatters between FWD and REV will detect a
-        # jam more slowly. Documented tradeoff, no code change here.
-        old_dir = old_state.get('direction', 'FWD')
-        new_dir = ch.state['direction']
-        if old_dir != new_dir:
-            self._prev_mm[ch.channel_id] = ch.state['feed_mm']
-            self._reset_stall_window(ch)
-            ch._direction_just_changed = True
-
-        # --- Windowed cumulative commanded-vs-measured stall detection ---
-        # Compares Klipper's COMMANDED extrusion (extruder.find_past_position)
-        # against the BMCU's MEASURED feed (feed_mm) over a rolling window of
-        # stall_window_polls polls. Fires only when the cumulative gap between
-        # commanded and measured keeps widening across the whole window — a
-        # real jam — rather than an instantaneous per-poll delta, which
-        # false-trips on steady-state slip and transient phase lag.
+        # --- Activity (liveness) stall detection ---
+        # Fires when, over the trailing stall_timeout_s, forward commanded
+        # extrusion reaches min_commanded_mm while total encoder movement
+        # stays under min_measured_mm. Movement is judged as ABSOLUTE
+        # displacement from _measured_ref, so a reversal reads as liveness,
+        # not as shortfall — no direction-change special-casing is needed.
+        # Only FORWARD commanded delta accumulates into
+        # _commanded_since_movement, which is the entire retraction
+        # tolerance.
         #
         # The elif and the trailing else below both read the SAME
         # stall_eligible local computed above — the else must not fall back
-        # to a motor-only condition, or it would wipe the window every poll
-        # on a passive channel and the require_motor_running relaxation
-        # would be inert.
+        # to a motor-only condition, or it would wipe the tracker every
+        # poll on a passive channel and the require_motor_running
+        # relaxation would be inert.
         if not ch._stall_enabled:
             # No extruder configured (no ground truth) — stall detection is
             # disabled entirely for this channel. Runout/insert are unaffected.
@@ -595,94 +660,119 @@ class BmcuFeeder:
             now_print_time = self._estimated_print_time(now)
             commanded_pos = ch._extruder_obj.find_past_position(now_print_time)
             measured_pos = ch.state['feed_mm']
-            if ch._direction_just_changed:
-                # The poll that spans a reversal is exactly the sample to
-                # discard: take the baseline directly from THIS poll's
-                # post-reversal positions rather than resetting to None and
-                # waiting for next poll to re-establish it — that discards
-                # the reversal delta while starting fresh immediately, with
-                # no extra baseline-only poll spent.
-                ch._direction_just_changed = False
-                self._take_stall_baseline(ch, commanded_pos, measured_pos)
-            elif ch._startup_polls_remaining > 0:
-                # Same reasoning as the direction-change branch above: take
-                # the baseline from this (still-suppressed) poll's own
-                # positions so the startup grace doesn't cost an extra
-                # baseline-only poll once it expires.
-                ch._startup_polls_remaining -= 1
-                self._take_stall_baseline(ch, commanded_pos, measured_pos)
+            if ch._measured_ref is None:
+                # First sample after a reset — nothing to compare against
+                # yet; this poll only establishes the baseline.
+                self._take_activity_baseline(ch, now, commanded_pos, measured_pos)
             else:
-                if ch._prev_commanded_pos is None:
-                    # First sample after a reset — need a delta before we can
-                    # evaluate anything.
-                    ch._prev_commanded_pos = commanded_pos
-                    ch._prev_measured_pos = measured_pos
+                commanded_delta = commanded_pos - ch._prev_commanded_pos
+                ch._prev_commanded_pos = commanded_pos
+                if abs(measured_pos - ch._measured_ref) >= ch.min_measured_mm:
+                    # Movement confirmed — the encoder is alive. Re-baseline
+                    # from this poll rather than resetting to None, so the
+                    # next poll can evaluate immediately.
+                    self._take_activity_baseline(ch, now, commanded_pos, measured_pos)
                 else:
-                    commanded_delta = commanded_pos - ch._prev_commanded_pos
-                    measured_delta = measured_pos - ch._prev_measured_pos
-                    ch._prev_commanded_pos = commanded_pos
-                    ch._prev_measured_pos = measured_pos
                     # Retraction handling: only FORWARD commanded movement
-                    # contributes to window_commanded. A pure retraction/travel
-                    # poll (commanded_delta <= 0) adds 0, so window_commanded
-                    # stays below min_commanded_mm and no stall is evaluated.
-                    ch._stall_window.append(
-                        (max(commanded_delta, 0.0), measured_delta))
-                    if len(ch._stall_window) > ch.stall_window_polls:
-                        ch._stall_window.pop(0)
-                    window_commanded = sum(c for c, m in ch._stall_window)
-                    window_measured = sum(m for c, m in ch._stall_window)
-                    if (len(ch._stall_window) >= ch.stall_window_polls
-                            and window_commanded >= ch.min_commanded_mm
-                            and window_measured < window_commanded * ch.slip_ratio
+                    # accumulates. A pure retraction/travel poll
+                    # (commanded_delta <= 0) adds 0, so
+                    # _commanded_since_movement stays below
+                    # min_commanded_mm and no stall is evaluated.
+                    ch._commanded_since_movement += max(commanded_delta, 0.0)
+                    if (now - ch._last_movement_time >= ch.stall_timeout_s
+                            and ch._commanded_since_movement >= ch.min_commanded_mm
                             and now >= ch.min_event_systime
                             and ch.sensor_enabled):
                         ch._lifetime_stall_count += 1
                         ch.min_event_systime = self.reactor.NEVER
-                        ch._stall_window_commanded = window_commanded
-                        ch._stall_window_measured = window_measured
-                        ratio = (window_measured / window_commanded
-                                  if window_commanded else 0.0)
+                        ch._stall_commanded_mm = ch._commanded_since_movement
+                        ch._stall_stalled_s = now - ch._last_movement_time
+                        ch._stall_measured_mm = abs(
+                            measured_pos - ch._measured_ref)
                         logging.info(
                             "BMCU ch%d: blockage detected commanded=%.2fmm "
-                            "measured=%.2fmm ratio=%.2f total_stalls=%d" %
-                            (ch.channel_id, window_commanded, window_measured,
-                             ratio, ch._lifetime_stall_count))
-                        self._reset_stall_window(ch)
+                            "stalled=%.1fs measured=%.2fmm total_stalls=%d" %
+                            (ch.channel_id, ch._stall_commanded_mm,
+                             ch._stall_stalled_s, ch._stall_measured_mm,
+                             ch._lifetime_stall_count))
+                        self._reset_activity_tracker(ch)
                         self.reactor.register_callback(
                             lambda et, c=ch: self._stall_handler(et, c))
         else:
-            ch._startup_polls_remaining = 0
-            ch._direction_just_changed = False
-            self._reset_stall_window(ch)
-        self._prev_mm[ch.channel_id] = ch.state['feed_mm']
+            self._reset_activity_tracker(ch)
 
-    def _reset_stall_window(self, ch):
-        """Clear the rolling commanded/measured window and the commanded
-        baseline, leaving the baseline to be re-established from scratch on
+    def _reset_activity_tracker(self, ch):
+        """Clear the activity tracker, to be re-established from scratch on
         the next eligible poll.  Used where the current sample is itself
         untrustworthy or unavailable: the not-eligible-to-eligible
-        transition (the extruder object / a real baseline may not exist
-        yet), the trailing ineligible else, and the post-fire reset.  See
-        _take_stall_baseline for the direction-change and startup-grace
-        cases, where the current sample IS trustworthy and reset would cost
-        an extra baseline-only poll.
+        transition, the trailing ineligible else, and the post-fire reset.
+        See _take_activity_baseline for the case where the current sample
+        IS trustworthy as a baseline.
         """
-        ch._stall_window = []
+        ch._measured_ref = None
+        ch._last_movement_time = None
         ch._prev_commanded_pos = None
-        ch._prev_measured_pos = None
+        ch._commanded_since_movement = 0.0
 
-    def _take_stall_baseline(self, ch, commanded_pos, measured_pos):
-        """Empty the rolling window and set the commanded/measured baseline
-        directly from the CURRENT poll's positions, instead of resetting to
-        None and costing an extra baseline-only poll before the next real
-        evaluation.  Used by the direction-change and startup-grace
-        branches: the current sample shouldn't itself be evaluated, but it
-        is trustworthy as a baseline for the next one.
+    def _take_activity_baseline(self, ch, now, commanded_pos, measured_pos):
+        """Set the activity tracker baseline directly from the CURRENT
+        poll's values — the encoder is confirmed alive (or the tracker is
+        being established for the first time) as of this poll.
         """
-        ch._stall_window = []
+        ch._measured_ref = measured_pos
+        ch._last_movement_time = now
         ch._prev_commanded_pos = commanded_pos
-        ch._prev_measured_pos = measured_pos
+        ch._commanded_since_movement = 0.0
+
+    def _update_encoder_fault(self, ch):
+        """Debounced mag_status health check (E77-D). 'ok', 'unknown' and
+        empty are healthy -- 'unknown' is the module's own initial value
+        and what a channel reports before its first STATUS ok line, so it
+        must never count as a fault (treating it as one would disable
+        stall detection for every channel that has not yet reported in).
+        Anything else (low/high/offline/OFFLINE/...) is unhealthy; after
+        _MAG_FAULT_DEBOUNCE_POLLS consecutive unhealthy polls the channel
+        is marked faulted, which _stall_eligible folds into the single
+        stall_eligible local so a dead encoder cannot masquerade as a jam.
+        Lowercasing before comparison is defensive -- the firmware emits
+        lowercase today, but the module must not depend on that.
+        """
+        mag = str(ch.state.get('mag_status', '')).strip().lower()
+        if mag in ('ok', 'unknown', ''):
+            ch._mag_fault_streak = 0
+            if ch._mag_faulted:
+                ch._mag_faulted = False
+                self.reactor.register_callback(
+                    lambda et, c=ch: self._encoder_fault_cleared_handler(et, c))
+            return
+        ch._mag_fault_streak += 1
+        if not ch._mag_faulted and ch._mag_fault_streak >= _MAG_FAULT_DEBOUNCE_POLLS:
+            ch._mag_faulted = True
+            self.reactor.register_callback(
+                lambda et, c=ch: self._encoder_fault_handler(et, c))
+
+    def _encoder_fault_handler(self, eventtime, ch):
+        mag = ch.state.get('mag_status', 'unknown')
+        self.gcode.respond_info(
+            "BMCU ch%d: encoder fault — magnet status '%s', blockage "
+            "detection suspended (this is a sensor fault, not a jam)" %
+            (ch.channel_id, mag))
+        self.gcode.respond_info(
+            "BMCU_EVENT event=encoder_fault channel=%d mag_status=%s" %
+            (ch.channel_id, mag))
+        logging.warning(
+            "BMCU ch%d: encoder fault — magnet status '%s'" %
+            (ch.channel_id, mag))
+        if ch.pause_on_encoder_fault:
+            pause_resume = self.printer.lookup_object('pause_resume')
+            pause_resume.send_pause_command()
+
+    def _encoder_fault_cleared_handler(self, eventtime, ch):
+        self.gcode.respond_info(
+            "BMCU ch%d: encoder fault cleared — blockage detection resumed"
+            % ch.channel_id)
+        self.gcode.respond_info(
+            "BMCU_EVENT event=encoder_fault_cleared channel=%d" % ch.channel_id)
 
     def _runout_handler(self, eventtime, ch):
         self.gcode.respond_info(
@@ -698,18 +788,19 @@ class BmcuFeeder:
         self._exec_gcode(ch, ch.insert_gcode)
 
     def _stall_handler(self, eventtime, ch):
-        commanded = ch._stall_window_commanded
-        measured = ch._stall_window_measured
-        ratio = measured / commanded if commanded else 0.0
+        commanded = ch._stall_commanded_mm
+        measured = ch._stall_measured_mm
+        stalled_s = ch._stall_stalled_s
         self.gcode.respond_info(
-            "BMCU: blockage/stall on channel %d — commanded %.2fmm but fed "
-            "only %.2fmm (%.0f%%)" %
-            (ch.channel_id, commanded, measured,
-             100.0 * measured / commanded if commanded else 0.0))
+            "BMCU: blockage/stall on channel %d — commanded %.2fmm while "
+            "the encoder went %.1fs without exceeding the %.2fmm movement "
+            "floor (total_stalls=%d)" %
+            (ch.channel_id, commanded, stalled_s, ch.min_measured_mm,
+             ch._lifetime_stall_count))
         self.gcode.respond_info(
-            "BMCU_EVENT event=stall channel=%d commanded_mm=%.2f measured_mm=%.2f "
-            "ratio=%.2f total_stalls=%d" %
-            (ch.channel_id, commanded, measured, ratio,
+            "BMCU_EVENT event=stall channel=%d commanded_mm=%.2f "
+            "measured_mm=%.2f stalled_s=%.1f total_stalls=%d" %
+            (ch.channel_id, commanded, measured, stalled_s,
              ch._lifetime_stall_count))
         # Pause BEFORE the gcode template runs — _exec_gcode swallows
         # template exceptions, so the pause must not be downstream of the
@@ -753,6 +844,14 @@ class BmcuFeeder:
                     'feed_mm_since_reset': float(
                         ch.state.get('feed_mm', 0.0) - ch._feed_mm_at_reset),
                     'stall_count': int(ch._lifetime_stall_count),
+                    'stall_min_rate_mms': float(
+                        ch.min_commanded_mm / ch.stall_timeout_s),
+                    'seconds_since_movement': float(
+                        eventtime - ch._last_movement_time)
+                        if ch._last_movement_time is not None else 0.0,
+                    'commanded_since_movement': float(
+                        ch._commanded_since_movement),
+                    'encoder_fault': bool(ch._mag_faulted),
                 }
                 for ch_id, ch in self._channels.items()
             }

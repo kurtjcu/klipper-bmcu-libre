@@ -100,7 +100,7 @@ Runout detection on any active channel triggers a configurable Klipper pause mac
 
 ### Jam and blockage detection
 
-The extra compares Klipper's commanded extrusion against the BMCU encoder's measured feed over a rolling window, and pauses the print when measured feed falls short for a sustained stretch — see [docs/configuration.md](docs/configuration.md) for the tuning knobs. A setup where the toolhead extruder pulls the filament (the BMCU acting as a passive encoder) needs `require_motor_running: False`, or the check never runs at all.
+The extra pauses the print when the BMCU encoder stops moving while extrusion is still being commanded — an activity (liveness) check, not a magnitude comparison — see [docs/configuration.md](docs/configuration.md) for the tuning knobs. A setup where the toolhead extruder pulls the filament (the BMCU acting as a passive encoder) needs `require_motor_running: False`, or the check never runs at all. A failed magnet sensor reports as a distinct encoder fault rather than a jam, so a dead sensor is never mistaken for filament jamming.
 
 ---
 
