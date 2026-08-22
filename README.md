@@ -2,6 +2,10 @@
 
 A Klipper integration layer for the BMCU 370C, exposing a standard UART interface in place of BambuBus.
 
+<img src="docs/images/bmcu-installed-enclosure.jpg" alt="BMCU 370C mounted on a printer enclosure panel, four bowden tubes routed up into the chamber, powered and connected over USB-C" width="420">
+
+*A BMCU 370C running this firmware — mounted on the printer enclosure panel, driven over USB-C, with all four channels feeding into the chamber. One channel is loaded (green LED); the other three are empty (red).*
+
 ---
 
 ## What this is
@@ -97,6 +101,10 @@ The Klipper extra exposes the following gcode commands:
 | `SET_BMCU_SENSOR CHANNEL=0 ENABLE=0` | Disable/enable runout detection for channel 0–3 |
 
 Runout detection on any active channel triggers a configurable Klipper pause macro.
+
+<img src="docs/images/bmcu-status-console.png" alt="Mainsail console showing BMCU_STATUS output: a per-channel table of filament presence, motor state, speed, direction, feed distance in mm, and magnet sensor health" width="420">
+
+*`BMCU_STATUS` in the Mainsail console. Per channel: filament presence, motor state, speed, direction, encoder feed distance, and magnet sensor health — `ok` here, or a fault when the AS5600 stops reporting.*
 
 ### Jam and blockage detection
 
