@@ -134,7 +134,7 @@ Status objects are available at `printer.bmcu_feeder.channels.N`:
 
 ---
 
-## Buffer mode (Tapchanger) {#buffer-mode-tapchanger}
+## Buffer mode (toolchanger) {#buffer-mode-toolchanger}
 
 Buffer mode integrates the BMCU with [viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger) to automatically activate/deactivate channels on tool pick/drop events. Runout detection is suppressed during toolchange transitions to prevent spurious pauses while filament is briefly absent from the microswitch.
 
@@ -147,10 +147,10 @@ Buffer mode integrates the BMCU with [viesturz/klipper-toolchanger](https://gith
 
 ```ini
 # Add to printer.cfg:
-[include bmcu/bmcu_buffer_tapchanger.cfg]
+[include bmcu/bmcu_buffer_toolchanger.cfg]
 ```
 
-Then merge the `[toolchanger]` gcode sections from `config/bmcu_buffer_tapchanger.cfg` with your existing `[toolchanger]` section, and add the `params_bmcu_channel`, `pickup_gcode`, and `dropoff_gcode` lines to each of your `[tool Tx]` sections as shown in that file.
+Then merge the `[toolchanger]` gcode sections from `config/bmcu_buffer_toolchanger.cfg` with your existing `[toolchanger]` section, and add the `params_bmcu_channel`, `pickup_gcode`, and `dropoff_gcode` lines to each of your `[tool Tx]` sections as shown in that file.
 
 ### How it works
 
@@ -167,9 +167,9 @@ This ensures the sensor is always disabled before any gantry motion begins and r
 
 - **Runout fires during toolchange:** Check that `before_change_gcode` in your `[toolchanger]` section contains `SET_BMCU_SENSOR CHANNEL=N ENABLE=0` for all configured channels. The sensor must be disabled before any gantry motion begins. If the disable is only in `dropoff_gcode`, it fires too late.
 
-- **`pickup_tool` is undefined error:** Your klipper-toolchanger version is too old. Update to 2026.2.15+ or use the per-tool fallback described in `config/bmcu_buffer_tapchanger.cfg`, which adds `SET_BMCU_SENSOR CHANNEL=N ENABLE=1` directly to each tool's `pickup_gcode` instead of using the Jinja2 variable lookup.
+- **`pickup_tool` is undefined error:** Your klipper-toolchanger version is too old. Update to 2026.2.15+ or use the per-tool fallback described in `config/bmcu_buffer_toolchanger.cfg`, which adds `SET_BMCU_SENSOR CHANNEL=N ENABLE=1` directly to each tool's `pickup_gcode` instead of using the Jinja2 variable lookup.
 
-- **Config error on `[tool T0]`:** The `[tool]` section type requires viesturz/klipper-toolchanger. Do not include `bmcu_buffer_tapchanger.cfg` on non-Tapchanger printers — use `bmcu_generic.cfg` only.
+- **Config error on `[tool T0]`:** The `[tool]` section type requires viesturz/klipper-toolchanger. Do not include `bmcu_buffer_toolchanger.cfg` on printers without klipper-toolchanger — use `bmcu_generic.cfg` only.
 
 ---
 
