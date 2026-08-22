@@ -161,6 +161,26 @@ ssh pi-host "python3 ~/klipper-bmcu-libre/tools/bmcu-flasher/bmcu_flasher.py ~/k
 #    BMCU_CONNECT
 ```
 
+## Troubleshooting
+
+### "Please install Git client from https://git-scm.com/downloads" (Windows)
+
+PlatformIO installs the CH32 platform straight from a git URL, so it needs a `git` binary on `PATH`. On Windows, installing Git while a terminal is already open does **not** update that terminal's `PATH` — PlatformIO keeps reporting the error even though git is installed.
+
+**Close PowerShell (or your terminal) completely and open a new one, then rebuild.** Reported and confirmed on Windows 11.
+
+### `firmware/upstream is empty`
+
+The submodule has not been initialised:
+
+```bash
+git submodule update --init --recursive
+```
+
+### `firmware/upstream is at the wrong commit`
+
+Something moved the submodule off the pinned V10.5 commit. Restore it with the same command as above. If you are deliberately moving to a newer upstream release, re-cut the patches in `firmware/patches/` against it and update `PINNED_SHA` in `firmware/build.sh` — see [../firmware/README.md](../firmware/README.md).
+
 ## Next step
 
 [Install the Klipper extra](klipper-install.md)
