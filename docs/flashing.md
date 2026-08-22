@@ -56,6 +56,14 @@ wchisp flash .pio/build/bmcu_libre/firmware.bin
 
 The ISP mode USB identifiers are VID `4348`, PID `55e0` (different from the normal CH340 operating mode).
 
+### MCU pinout reference
+
+For SWD debugging or tracing the BOOT0 / NRST lines on the mainboard:
+
+<img src="main_mcu_pinout.jpg" alt="PCB trace layout around the CH32V203 main MCU, with every pin labelled including BOOT0, NRST, SWCLK, SWDIO, MCU_RX, MCU_TX, the four motor drive pairs and the per-channel I2C sensor buses" width="640">
+
+*CH32V203 main MCU pinout — BOOT0, NRST and SWCLK/SWDIO for recovery flashing, `MCU_RX`/`MCU_TX` for the CH340 link, plus the four `MOTORn_H`/`MOTORn_L` drive pairs and the per-channel `MCU_SCL`/`MCU_SDA` sensor buses.*
+
 ## Building from source (developers)
 
 ```bash
@@ -113,6 +121,10 @@ Replace `YOUR_PATH_HERE` with the full path from `ls /dev/serial/by-path/`.
 | Solid green | Filament present |
 | Solid red | Filament absent |
 | Flashing white | Motor feeding |
+
+<img src="images/bmcu-channel-leds.jpg" alt="Close view of a BMCU 370C's four channels after ENABLE: three channels showing solid red for filament absent and one showing solid green for filament present, with the channel numbers 4/3/2/1 moulded into the housings" width="420">
+
+*An enabled BMCU: three channels solid red (filament absent), one solid green (filament present). The channel numbers moulded into the housings run 1–4, while the Klipper gcode commands are zero-indexed (`CHANNEL=0`–`3`) — load one channel at a time and check `BMCU_STATUS` to confirm which housing maps to which index on your unit.*
 
 ## Remote flashing (dev machine to Pi)
 

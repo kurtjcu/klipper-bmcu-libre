@@ -37,6 +37,12 @@ Some mainboard variants have a known issue with the **SS54 diode at position D4*
 
 Full KiCad schematics and Gerbers are on [OSHWhub](https://oshwhub.com/bamboo-shoot-xmcu-pcb-team/bmcu). The Type-C variant (@XC's board) is a separate design on the same platform.
 
+A copy of the Type-C mainboard schematic is kept in this repo for reference:
+
+<img src="9addfbe7905d411dac65fdf7ad6c8a3d.webp" alt="Full BMCU-370 Type-C mainboard schematic showing the CH32V203 main MCU, the 24V-to-3.3V and 24V-to-12V converters, the four motor driver stages, the USB Type-C auto-download circuit and the RS485 section" width="720">
+
+*BMCU-370 Type-C mainboard schematic. Relevant here: the **24V→3.3V** and **24V→12V** converters fed from the AMS connector, the four motor driver stages, the **auto-download** (AutoDI) circuit on the Type-C port, and the **RS485** section this project leaves unused.*
+
 ## USB connection
 
 Plug one end of the USB-C cable into the Type-C port on the BMCU mainboard and the other end into a free USB port on your Klipper host. No RS485 adapter, no ESP32 bridge, no additional wiring is required. The CH340 chip on the mainboard handles USB-to-serial conversion. Linux loads the `ch341` driver automatically on the first connection — no manual driver installation is needed.
