@@ -14,7 +14,9 @@ The BMCU 370C is a 4-channel motorised filament feeder with per-channel AS5600 H
 
 This project replaces the BambuBus communication layer with a standard 8N1 UART interface exposed over the onboard Type-C USB port, and provides a Klipper extra to drive it. The CH32 motion control loop, PID tuning, and per-channel logic run unchanged — only the communication layer is replaced.
 
-The target use case is a Voron V2.4 Tapchanger where each BMCU channel acts as a secondary feeder assist behind a primary extruder (Orbiter v2 + Galileo 2) on a ~500mm bowden run. This is not a multi-material/colour switching project — each channel simply feeds or doesn't, triggered by toolhead pick/drop events in Klipper.
+The target use case is a Voron V2.4 [StealthChanger](https://github.com/DraftShift/StealthChanger) where each BMCU channel acts as a secondary feeder assist behind a primary extruder (Orbiter v2 + Galileo 2) on a ~500mm bowden run. This is not a multi-material/colour switching project — each channel simply feeds or doesn't, triggered by toolhead pick/drop events in Klipper.
+
+Buffer mode drives this through [viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger), so it works with any toolchanger built on that module — StealthChanger and Tapchanger alike.
 
 ---
 
@@ -41,7 +43,7 @@ No ESP32. No RS485 adapter. Just a USB-C cable between the BMCU and your Klipper
 - [x] Standard UART firmware (`firmware/` — 8N1 over CH340 USB-C)
 - [x] Klipper extra (`klippy/extras/bmcu_feeder.py`)
 - [x] Generic config (`config/bmcu_generic.cfg`)
-- [x] Buffer mode config for Tapchanger (`config/bmcu_buffer_tapchanger.cfg`)
+- [x] Buffer mode config for klipper-toolchanger printers (`config/bmcu_buffer_toolchanger.cfg`)
 - [x] Documentation (`docs/`)
 
 ---
@@ -53,7 +55,9 @@ No ESP32. No RS485 adapter. Just a USB-C cable between the BMCU and your Klipper
 2. **Install Klipper extra** — see [docs/klipper-install.md](docs/klipper-install.md)
 3. **Configure** — see [docs/configuration.md](docs/configuration.md)
 
-For Tapchanger buffer mode, also include `config/bmcu_buffer_tapchanger.cfg` — see [docs/configuration.md](docs/configuration.md#buffer-mode-tapchanger).
+For toolchanger buffer mode — StealthChanger, Tapchanger, or any setup built on [viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger) — also include `config/bmcu_buffer_toolchanger.cfg`. See [docs/configuration.md](docs/configuration.md#buffer-mode-toolchanger).
+
+> **Renamed:** this file was `config/bmcu_buffer_tapchanger.cfg` until 2026-08-23. If your `printer.cfg` has an `[include]` pointing at the old name, update it.
 
 ---
 
@@ -137,7 +141,8 @@ Our contribution is `uart_protocol.cpp` (a standard 8N1 ASCII protocol on USART1
 | [MillionthOdin16/BMCU370t](https://github.com/MillionthOdin16/BMCU370t) | Alternative community firmware |
 | [druckgott/bambulab_ams_diy_esp32](https://github.com/druckgott/bambulab_ams_diy_esp32) | ESP32 BMCU port — confirms BambuBus protocol is fully reversible |
 | [ArmoredTurtle/AFC-Klipper-Add-On](https://github.com/ArmoredTurtle/AFC-Klipper-Add-On) | Multi-channel filament manager for Klipper — reference implementation |
-| [viesturz/tapchanger](https://github.com/viesturz/tapchanger) | Voron Tapchanger — the toolchanger this was built for |
+| [DraftShift/StealthChanger](https://github.com/DraftShift/StealthChanger) | Voron StealthChanger — the toolchanger this was built for |
+| [viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger) | Klipper toolchanger module — what buffer mode integrates with |
 | [BMCU wiki](https://wiki.yuekai.fr/BMCU) | Community BMCU documentation |
 | [BMCU protocol deep dive](https://deepwiki.com/karlingen/BMCU) | BambuBus protocol reverse engineering |
 

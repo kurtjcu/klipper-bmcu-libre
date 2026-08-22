@@ -75,9 +75,34 @@ for p in "${PATCHES[@]}"; do
 done
 
 # --- 5. build --------------------------------------------------------------
-command -v pio >/dev/null 2>&1 || die "PlatformIO ('pio') is not on PATH. See docs/flashing.md."
+# Prefer the project venv, so a plain ./firmware/build.sh works without the
+# caller having activated anything.
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
+if [ -x "$REPO_ROOT/.venv/bin/pio" ]; then
+  PIO="$REPO_ROOT/.venv/bin/pio"
+elif command -v pio >/dev/null 2>&1; then
+  PIO="$(command -v pio)"
+else
+  die "PlatformIO ('pio') not found.
+
+  Install it into the project venv (inside the dev box, not on the host):
+
+    distrobox enter dev
+    uv venv --python 3.12 .venv
+    uv pip install --python .venv/bin/python platformio
+
+  See docs/flashing.md."
+fi
+say "platformio ..... $("$PIO" --version 2>/dev/null | head -1)"
+
+# Keep downloaded toolchains and platforms inside the repo rather than in
+# ~/.platformio, so a checkout is self-contained and nothing is written
+# outside the project. Override by exporting PLATFORMIO_CORE_DIR yourself.
+export PLATFORMIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HERE/.pio-core}"
+say "pio core dir ... ${PLATFORMIO_CORE_DIR}"
+
 echo
-( cd "$BUILD" && pio run -e "$PIO_ENV" )
+( cd "$BUILD" && "$PIO" run -e "$PIO_ENV" )
 
 BIN="$BUILD/.pio/build/$PIO_ENV/firmware.bin"
 [ -f "$BIN" ] || die "build reported success but $BIN is missing."

@@ -1,1 +1,5 @@
 .planning/
+
+# Full-resolution camera originals: web-sized copies are committed instead
+docs/images/PXL_*.jpg
+docs/images/Screenshot From *.png

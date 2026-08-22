@@ -1,8 +1,10 @@
-# PRD: BMCU 370C as Klipper Filament Feeder Assist — Voron V2.4 Tapchanger
+# PRD: BMCU 370C as Klipper Filament Feeder Assist — Voron V2.4 StealthChanger
 
 ## Overview
 
-Repurpose a BMCU 370C (BLV Kit B, fully assembled) as a 4-channel motorised filament feeder assist for a Voron V2.4 Tapchanger. Each channel serves one independent toolhead over a ~500mm PTFE bowden run, acting as a secondary feeder behind an Orbiter v2 + Galileo 2 primary extruder.
+Repurpose a BMCU 370C (BLV Kit B, fully assembled) as a 4-channel motorised filament feeder assist for a Voron V2.4 [StealthChanger](https://github.com/DraftShift/StealthChanger). Each channel serves one independent toolhead over a ~500mm PTFE bowden run, acting as a secondary feeder behind an Orbiter v2 + Galileo 2 primary extruder.
+
+Buffer mode integrates through [viesturz/klipper-toolchanger](https://github.com/viesturz/klipper-toolchanger), so the Klipper-side plumbing is not StealthChanger-specific — it applies to any toolchanger built on that module.
 
 This is **not** a multi-material/colour switching project. No filament hub. No AMS handoff logic. Each channel simply feeds or doesn't.
 
@@ -17,7 +19,8 @@ This is **not** a multi-material/colour switching project. No filament hub. No A
 | Channels | 4 independent — each has 370 DC motor + AS5600 Hall sensor + dual microswitches |
 | Mainboard | Type-C version — onboard CH340 USB-to-TTL |
 | Host | Raspberry Pi / BTT Pi running Klipper |
-| Toolheads | 4x Dragon Burner on Tapchanger, Orbiter v2 + Galileo 2 extruders |
+| Toolchanger | Voron V2.4 StealthChanger, driven in Klipper by viesturz/klipper-toolchanger |
+| Toolheads | 4x Dragon Burner, Orbiter v2 + Galileo 2 extruders |
 
 ---
 
@@ -130,7 +133,8 @@ No ESP32. No RS485 adapter. Just a USB-C cable.
 - BMCU protocol deep dive: https://deepwiki.com/karlingen/BMCU
 - BMCU wiki: https://wiki.yuekai.fr/BMCU
 - High torque STLs (MakerWorld): https://makerworld.com/en/models/1412302
-- Voron Tapchanger: https://github.com/viesturz/tapchanger
+- Voron StealthChanger: https://github.com/DraftShift/StealthChanger
+- Klipper toolchanger module: https://github.com/viesturz/klipper-toolchanger
 
 ---
 
@@ -138,4 +142,4 @@ No ESP32. No RS485 adapter. Just a USB-C cable.
 
 - The jarczakpawel firmware developer is actively fundraising to build Klipper support — worth tracking and contributing to: https://github.com/jarczakpawel/BMCU-C-PJARCZAK
 - GitHub issue filed against that repo proposing the standard UART approach
-- No one has done BMCU + Klipper + Tapchanger feeder assist before — this is novel territory
+- No one has done BMCU + Klipper + toolchanger feeder assist before — this is novel territory
