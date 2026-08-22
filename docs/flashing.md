@@ -1,27 +1,39 @@
 # Firmware Flashing
 
-The BMCU libre firmware is built from source using PlatformIO. Pre-built upstream firmware variants are available in `firmware/firmwares/` for reference, but the libre build (which includes the UART protocol required by the Klipper extra) must be compiled from source.
+The BMCU libre firmware is built from source using PlatformIO.
+
+This repo does not vendor the upstream firmware — it is a pinned git submodule, assembled with our patch set at build time. **Clone with submodules before building:**
+
+```bash
+git submodule update --init --recursive
+```
+
+That populates both `firmware/upstream/` (the BMCU firmware) and `tools/bmcu-flasher/` (the flashing tool). Without it, the commands below fail with missing files.
+
+Pre-built *upstream* firmware variants — the BambuBus builds, not the libre build — are in `firmware/upstream/firmwares/` once the submodule is initialised. The libre build must be compiled from source.
 
 ## Option A: bmcu-flasher (recommended)
 
-The `bmcu-flasher` tool is included in this repo at `tools/bmcu-flasher/`. It handles automatic bootloader entry on Type-C mainboards (AutoDI) and provides both a GUI and CLI interface.
+The `bmcu-flasher` tool is a submodule at `tools/bmcu-flasher/`. It handles automatic bootloader entry on Type-C mainboards (AutoDI) and provides both a GUI and CLI interface.
 
 First, build the libre firmware:
 
 ```bash
-cd firmware
-pio run -e bmcu_libre
-# Output: .pio/build/bmcu_libre/firmware.bin
+./firmware/build.sh
+# Output: firmware/build/.pio/build/bmcu_libre/firmware.bin
 ```
+
+`build.sh` assembles a build tree from the pinned submodule, our `uart_protocol.*` sources and the patch set, then runs PlatformIO. It checks the submodule is on the pinned commit first and stops if it is not, rather than applying patches to a revision they were never written against.
 
 Then flash it:
 
 ```bash
 # USB mode (Type-C mainboard with CH340 AutoDI):
-python3 tools/bmcu-flasher/bmcu_flasher.py .pio/build/bmcu_libre/firmware.bin --mode usb
+python3 tools/bmcu-flasher/bmcu_flasher.py \
+  firmware/build/.pio/build/bmcu_libre/firmware.bin --mode usb
 ```
 
-> **Important:** You MUST use the `bmcu_libre` environment (`-e bmcu_libre`). Other environments in `platformio.ini` do not include the UART protocol changes and will behave like unmodified upstream firmware.
+> **Important:** `build.sh` always builds the `bmcu_libre` environment. If you invoke PlatformIO by hand, you MUST pass `-e bmcu_libre` — the upstream environments do not include the UART protocol changes and behave like unmodified upstream firmware.
 
 ### If AutoDI does not trigger automatically
 
@@ -67,12 +79,13 @@ For SWD debugging or tracing the BOOT0 / NRST lines on the mainboard:
 ## Building from source (developers)
 
 ```bash
-cd firmware
-pio run -e bmcu_libre
-# Output: .pio/build/bmcu_libre/firmware.bin
+./firmware/build.sh
+# Output: firmware/build/.pio/build/bmcu_libre/firmware.bin
 ```
 
-The `bmcu_libre` environment sets the following build flags:
+The assembled tree lives in `firmware/build/` (gitignored, rebuilt from scratch each run). The submodule in `firmware/upstream/` is never modified, so `git status` stays clean.
+
+The `bmcu_libre` environment — added by `firmware/patches/0002-platformio-bmcu-libre-env.patch` — sets the following build flags:
 
 | Flag | Value | Effect |
 |------|-------|--------|
@@ -132,11 +145,11 @@ If PlatformIO is not installed on the Pi, build locally and deploy:
 
 ```bash
 # 1. Build on dev machine
-cd firmware
-pio run -e bmcu_libre
+./firmware/build.sh
 
 # 2. Copy binary to Pi
-scp .pio/build/bmcu_libre/firmware.bin pi-host:~/klipper-bmcu-libre/firmware/
+scp firmware/build/.pio/build/bmcu_libre/firmware.bin \
+  pi-host:~/klipper-bmcu-libre/firmware/
 
 # 3. Release serial port (in Klipper console)
 #    BMCU_DISCONNECT

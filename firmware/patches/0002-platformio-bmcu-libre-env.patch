@@ -1,0 +1,29 @@
+Subject: [PATCH 2/2] Add the bmcu_libre PlatformIO build environment
+
+Appends a new [env:bmcu_libre] section. Additions only -- no upstream
+environment is modified.
+
+Applies to: jarczakpawel/BMCU-C-PJARCZAK @ V10.5 (fbff4e3215bd...)
+Files touched: 1   Changed lines: 15
+---
+--- a/platformio.ini
++++ b/platformio.ini
+@@ -501,3 +501,18 @@
+   ${env:base.build_flags}
+   -DBAMBU_BUS_AMS_NUM=3
+   -DAMS_RETRACT_LEN=0.90f
++
++[env:bmcu_libre]
++platform = https://github.com/Community-PIO-CH32V/platform-ch32v.git
++board = genericCH32V203C8T6
++framework = noneos-sdk
++build_flags =
++    -DSYSCLK_FREQ_144MHz_HSI=144000000
++    -DBAMBU_BUS_AMS_NUM=0
++    -DAMS_RETRACT_LEN=0.095f
++    -DBMCU_LIBRE=1
++    -DUART_BAUD=115200
++    -DUART_PROTOCOL_ENABLED=1
++    -DDISABLE_BAMBUBUS=1
++upload_protocol = custom
++upload_command = sudo python3 ../tools/bmcu-flasher/bmcu_flasher.py $SOURCE --mode usb

@@ -1,3 +1,6 @@
 [submodule "tools/bmcu-flasher"]
 	path = tools/bmcu-flasher
 	url = https://github.com/jarczakpawel/BMCU-Flasher.git
+[submodule "firmware/upstream"]
+	path = firmware/upstream
+	url = https://github.com/jarczakpawel/BMCU-C-PJARCZAK.git

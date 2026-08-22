@@ -48,6 +48,7 @@ No ESP32. No RS485 adapter. Just a USB-C cable between the BMCU and your Klipper
 
 ## Quick start
 
+0. **Clone with submodules** — `git submodule update --init --recursive`
 1. **Flash firmware** — see [docs/flashing.md](docs/flashing.md)
 2. **Install Klipper extra** — see [docs/klipper-install.md](docs/klipper-install.md)
 3. **Configure** — see [docs/configuration.md](docs/configuration.md)
@@ -114,9 +115,17 @@ The extra pauses the print when the BMCU encoder stops moving while extrusion is
 
 ## Firmware
 
-This project forks the [jarczakpawel BMCU-C community firmware](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) and modifies `BambuBus.cpp` to add a standard UART mode on the CH340 port alongside the existing BambuBus RS485 interface.
+The BMCU firmware itself is the work of [jarczakpawel](https://github.com/jarczakpawel) in [BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK). **It is not copied into this repository** — it is referenced as a pinned git submodule and assembled at build time.
 
-The fork lives in `/firmware` in this repo.
+```
+firmware/
+    upstream/   submodule -> jarczakpawel/BMCU-C-PJARCZAK @ V10.5
+    patches/    our changes to upstream files (74 lines)
+    src/        our own sources (uart_protocol.cpp / .h)
+    build.sh    assembles upstream + patches + our sources, then builds
+```
+
+Our contribution is `uart_protocol.cpp` (a standard 8N1 ASCII protocol on USART1) plus a 74-line patch adding its call sites and the `bmcu_libre` build environment. See [firmware/README.md](firmware/README.md).
 
 ---
 
@@ -142,4 +151,13 @@ This is early-stage work. If you have a BMCU 370C and a non-Bambu printer, issue
 
 ## License
 
-Firmware modifications are subject to the upstream [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) license. Klipper extra and macros are MIT.
+This project's own code — the Klipper extra, the macros, `firmware/src/uart_protocol.*` and the patch set — is **GPL-3.0** ([LICENSE](LICENSE)). The Klipper extra is loaded into and calls Klipper, which is itself GPL-3.0.
+
+Two dependencies are referenced as submodules rather than copied, and keep their own terms:
+
+| Submodule | Upstream | License |
+|---|---|---|
+| `firmware/upstream` | [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) | **None stated** — all rights reserved by the author |
+| `tools/bmcu-flasher` | [jarczakpawel/BMCU-Flasher](https://github.com/jarczakpawel/BMCU-Flasher) | MIT |
+
+Because `BMCU-C-PJARCZAK` states no license, this repository does not redistribute it. Building fetches it from the author's own repository. If you redistribute a compiled binary, note that it contains that upstream code.

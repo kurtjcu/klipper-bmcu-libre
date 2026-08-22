@@ -1,0 +1,208 @@
+Subject: [PATCH 1/2] Hook the libre UART protocol into the BMCU firmware
+
+Adds the call sites needed for uart_protocol.cpp (this project's own file,
+supplied separately) and guards the BambuBus/RS485 paths behind
+DISABLE_BAMBUBUS so the libre build can own USART1.
+
+Applies to: jarczakpawel/BMCU-C-PJARCZAK @ V10.5 (fbff4e3215bd...)
+Files touched: 7   Changed lines: 59
+---
+--- a/src/_bus_hardware.cpp
++++ b/src/_bus_hardware.cpp
+@@ -1,3 +1,5 @@
++#ifndef DISABLE_BAMBUBUS
++
+ #include "_bus_hardware.h"
+ 
+ #include "ch32v20x.h"
+@@ -129,4 +131,6 @@
+         // TX done
+         bus_port_to_host.idle = true;
+     }
+-}
+\ No newline at end of file
++}
++
++#endif /* DISABLE_BAMBUBUS */
+\ No newline at end of file
+--- a/src/ahub_bus.cpp
++++ b/src/ahub_bus.cpp
+@@ -1,3 +1,5 @@
++#ifndef DISABLE_BAMBUBUS
++
+ #include "ahub_bus.h"
+ 
+ #include <string.h>
+@@ -410,3 +412,5 @@
+     return package_type;
+ }
+ 
++#endif /* DISABLE_BAMBUBUS */
++
+--- a/src/bambu_bus_ams.cpp
++++ b/src/bambu_bus_ams.cpp
+@@ -1,3 +1,5 @@
++#ifndef DISABLE_BAMBUBUS
++
+ #include "bambu_bus_ams.h"
+ #include <string.h>
+ #include "hal/irq_wch.h"
+@@ -1290,3 +1292,5 @@
+     return stu;
+ }
+ 
++#endif /* DISABLE_BAMBUBUS */
++
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -3,12 +3,19 @@
+ 
+ #include "Flash_saves.h"
+ #include "Motion_control.h"
++#ifndef DISABLE_BAMBUBUS
+ #include "_bus_hardware.h"
++#endif
+ #include "ams.h"
++#ifndef DISABLE_BAMBUBUS
+ #include "ahub_bus.h"
+ #include "bambu_bus_ams.h"
++#endif
+ #include "ADC_DMA.h"
+ #include "Debug_log.h"
++#ifdef UART_PROTOCOL_ENABLED
++#include "uart_protocol.h"
++#endif
+ #include <string.h>
+ 
+ WS2812_class SYS_RGB;
+@@ -165,8 +172,18 @@
+ 
+ int main(void)
+ {
++    /* FIRST: Feed IWDG immediately — hardware watchdog starts at reset */
++    IWDG->CTLR = 0xAAAA;
++
+     SystemInit();
+     SystemCoreClockUpdate();
++
++    /* Reconfigure IWDG to max timeout ASAP */
++    IWDG->CTLR = 0x5555;            /* Unlock prescaler/reload */
++    IWDG->PSCR = IWDG_Prescaler_256; /* 128kHz/256 = 500Hz */
++    IWDG->RLDR = 0xFFF;             /* Reload = 4095 → ~8.2s timeout */
++    IWDG->CTLR = 0xAAAA;            /* Reload with new values */
++
+     time_hw_init();
+ 
+     __enable_irq();
+@@ -178,18 +195,28 @@
+     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
+     GPIO_PinRemapConfig(GPIO_Remap_PD01, ENABLE);
+ 
++    IWDG->CTLR = 0xAAAA;
+     RGB_init();
+     delay(10);
+ 
+     SYS_RGB.set_RGB(0x10, 0x00, 0x00, 0);
+     for (int i = 0; i < 4; i++) RGBOUT[i].set_RGB(0, 0, 0, 0);
++    IWDG->CTLR = 0xAAAA;
+     RGB_update();
++#ifndef UART_PROTOCOL_ENABLED
+     delay(50);
++#endif
+ 
+     DEBUG_init();
+     ams_init();
+     Flash_saves_init();
++    IWDG->CTLR = 0xAAAA;
+ 
++#ifdef UART_PROTOCOL_ENABLED
++    /* In UART/Klipper mode, start UART only. Hardware (ADC, AS5600, motors)
++       is initialized on-demand via the ENABLE command. */
++    uart_protocol_init();
++#else
+     ADC_DMA_init();
+     ADC_DMA_wait_full();
+ 
+@@ -219,19 +246,25 @@
+     }
+ 
+     Motion_control_init();
++#endif
++#ifndef DISABLE_BAMBUBUS
+     bambubus_init();
+     bus_init();
++#endif
+ 
+     DEBUG("START\n");
+ 
+     while (1)
+     {
++#ifndef DISABLE_BAMBUBUS
+         const ahubus_package_type   ahub_stu     = ahubus_run();
+         const bambubus_package_type bambubus_stu = bambubus_run();
+         bus_port_to_host.send_package();
++#endif
+ 
+         static int error = 0;
+ 
++#ifndef DISABLE_BAMBUBUS
+         if ((ahub_stu != ahubus_package_type::none) || (bambubus_stu != bambubus_package_type::none))
+         {
+             if ((ahub_stu != ahubus_package_type::error) || (bambubus_stu != bambubus_package_type::error))
+@@ -256,8 +289,14 @@
+                 SYS_RGB.set_RGB(0x10, 0x00, 0x00, 0);
+             }
+         }
++#endif
+ 
++#ifndef UART_PROTOCOL_ENABLED
+         Motion_control_run(error);
+         RGB_update();
++#else
++        Motion_control_run(0);
++        uart_protocol_tick();
++#endif
+     }
+ }
+\ No newline at end of file
+--- a/src/Motion_control.cpp
++++ b/src/Motion_control.cpp
+@@ -175,7 +175,7 @@
+ static float  MC_PULL_stu_raw[4]        = {1.65f, 1.65f, 1.65f, 1.65f};
+ static int8_t MC_PULL_stu[4]            = {0, 0, 0, 0};
+ 
+-static uint8_t  MC_ONLINE_key_stu[4]    = {0, 0, 0, 0};
++uint8_t  MC_ONLINE_key_stu[4]    = {0, 0, 0, 0};
+ static uint8_t  g_on_use_low_latch[4]   = {0, 0, 0, 0};   // 1=stop motor latch
+ static uint8_t  g_on_use_jam_latch[4]   = {0, 0, 0, 0};   // 1=real jam -> 0xF06F
+ static uint32_t g_on_use_hi_pwm_us[4]   = {0u, 0u, 0u, 0u};
+--- a/src/Motion_control.h
++++ b/src/Motion_control.h
+@@ -3,6 +3,7 @@
+ #include <stdbool.h>
+ 
+ void Motion_control_init();
++void MC_PWM_init();
+ void Motion_control_set_PWM(uint8_t CHx, int PWM);
+ void Motion_control_run(int error);
+ bool Motion_control_save_dm_key_none_thresholds(void);
+@@ -17,6 +18,7 @@
+ extern int8_t  MC_PULL_POLARITY[4];
+ extern float   MC_DM_KEY_NONE_THRESH[4];
+ extern bool    filament_channel_inserted[4];
++extern uint8_t MC_ONLINE_key_stu[4];
+ 
+ // platformio.ini: -DBAMBU_BUS_AMS_NUM
+ #ifndef BAMBU_BUS_AMS_NUM
+--- a/src/Debug_log.cpp
++++ b/src/Debug_log.cpp
+@@ -80,7 +80,9 @@
+ void Debug_log_init(void)
+ {
+     if (g_dbg_inited) return;
++#ifndef UART_PROTOCOL_ENABLED
+     Debug_uart3_dma_init(Debug_log_baudrate);
++#endif
+     g_dbg_inited = 1;
+ }
+ 
